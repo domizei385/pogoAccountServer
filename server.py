@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from flask import Flask, request
+from flask_basicauth import BasicAuth
 
 from config import Config
 from db_connection import DbConnection as Db
@@ -26,6 +27,10 @@ class AccountServer:
 
     def launch_server(self):
         self.app = Flask(__name__)
+        self.app.config['BASIC_AUTH_USERNAME'] = Config.auth_username
+        self.app.config['BASIC_AUTH_PASSWORD'] = Config.auth_password
+        basic_auth = BasicAuth(self.app)
+        self.app.config['BASIC_AUTH_FORCE'] = True
         self.app.config['MAX_CONTENT_LENGTH'] = 16 * 1000 * 1000
 
         self.app.add_url_rule('/', "fallback", self.fallback, methods=['GET', 'POST'])

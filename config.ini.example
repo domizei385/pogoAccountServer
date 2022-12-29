@@ -1,6 +1,8 @@
 [general]
 listen_host = 127.0.0.1
 listen_port = 9008
+auth_username = authuser
+auth_password = authpw
 
 [database]
 host = 127.0.0.1
