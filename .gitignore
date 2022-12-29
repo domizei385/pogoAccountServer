@@ -1,0 +1,7 @@
+__pycache__
+*.txt
+.idea
+*.log
+testing/scripts
+config.ini
+protos

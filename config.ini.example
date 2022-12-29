@@ -1,0 +1,10 @@
+[general]
+listen_host = 127.0.0.1
+listen_port = 9008
+
+[database]
+host = 127.0.0.1
+port = 3306
+user = user
+pass = pw
+db = pogo_accounts
