@@ -117,7 +117,7 @@ class AccountServer:
         mark_used = f"UPDATE accounts SET in_use_by = '{device}', last_use = '{int(time.time())}' WHERE username = '{username}';"
         with Db() as conn:
             conn.cur.execute(mark_used)
-        logger.info(f"return {username=}, {pw=}")
+        logger.info(f"Request from {device}: return {username=}, {pw=}")
         return self.resp_ok({"username": username, "password": pw})
 
 
