@@ -100,8 +100,12 @@ class AccountServer:
             return self.invalid_request()
         username = None
         pw = None
-        reset = f"UPDATE accounts SET in_use_by = NULL WHERE in_use_by = '{device}';"
-        select = f"SELECT username, password from accounts WHERE in_use_by is NULL ORDER BY last_use ASC LIMIT 1;"
+        now = int(time.time())
+        cooldown_seconds = Config.cooldown_hours * 60 * 60
+        last_returned_limit = now - cooldown_seconds
+        reset = f"UPDATE accounts SET in_use_by = NULL, last_returned = '{now}' WHERE in_use_by = '{device}';"
+        select = ("SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < "
+                  f"{last_returned_limit} ORDER BY last_use ASC LIMIT 1;")
         with Db() as conn:
             conn.cur.execute(reset)
         with Db() as conn:
@@ -114,7 +118,8 @@ class AccountServer:
             logger.warning(f"Unable to return an account for {device}")
             return self.invalid_request({"error": "No accounts available"})
 
-        mark_used = f"UPDATE accounts SET in_use_by = '{device}', last_use = '{int(time.time())}' WHERE username = '{username}';"
+        mark_used = (f"UPDATE accounts SET in_use_by = '{device}', last_use = '{int(time.time())}' WHERE "
+                     f"username = '{username}';")
         with Db() as conn:
             conn.cur.execute(mark_used)
         logger.info(f"Request from {device}: return {username=}, {pw=}")

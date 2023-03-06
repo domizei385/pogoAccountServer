@@ -4,4 +4,5 @@ create table accounts (
     password text,
     last_use bigint default 0,
     in_use_by text,
+    last_returned bigint default 0,
     primary key (username))

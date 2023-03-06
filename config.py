@@ -13,6 +13,7 @@ class Config:
     listen_port = general.getint("listen_port", 9009)
     auth_username = general.get("auth_username", None)
     auth_password = general.get("auth_password", None)
+    cooldown_hours = general.getint("cooldown", 24)
 
     database = config["database"]
     db_host = database.get("host", "127.0.0.1")
