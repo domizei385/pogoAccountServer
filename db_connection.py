@@ -31,3 +31,15 @@ class DbConnection:
 
     def cursor(self, *args, **kwargs):
         return self.conn.cursor(*args, **kwargs)
+
+    @classmethod
+    def get_single_results(cls, *sqls):
+        res: list = []
+        with cls() as conn:
+            for sql in sqls:
+                conn.cur.execute(sql)
+                # get the first element of the cursor (tuple) - or if it's none, get a list [None]
+                # then return the first element of that result (the actual query result, or None)
+                # https://stackoverflow.com/a/68186597
+                res.append(next(conn.cur, [None])[0])
+        return res

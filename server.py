@@ -38,6 +38,7 @@ class AccountServer:
         self.app.add_url_rule('/<first>/<path:rest>', "fallback", self.fallback, methods=['GET', 'POST'])
 
         self.app.add_url_rule("/get/<device>", "get_account", self.get_account, methods=['GET', 'POST'])
+        self.app.add_url_rule("/stats", "stats", self.stats, methods=['GET'])
 
         werkzeug_logger = logging.getLogger("werkzeug")
         werkzeug_logger.setLevel(logging.WARNING)
@@ -123,7 +124,23 @@ class AccountServer:
         with Db() as conn:
             conn.cur.execute(mark_used)
         logger.info(f"Request from {device}: return {username=}, {pw=}")
+        logger.info(self.stats())
         return self.resp_ok({"username": username, "password": pw})
+
+    def stats(self):
+        # TODO: doubled code
+        now = int(time.time())
+        cooldown_seconds = Config.cooldown_hours * 60 * 60
+        last_returned_limit = now - cooldown_seconds
+
+        cd_sql = f"SELECT count(*) from accounts WHERE last_returned >= {last_returned_limit}"
+        in_use_sql = "SELECT count(*) from accounts WHERE in_use_by IS NOT NULL"
+        total_sql = "SELECT count(*) from accounts"
+
+        cd, in_use, total = Db.get_single_results(cd_sql, in_use_sql, total_sql)
+        available = total - in_use - cd
+
+        return {"accounts": total, "in_use": in_use, "cooldown": cd, "available": available}
 
 
 if __name__ == "__main__":
