@@ -17,8 +17,9 @@ class AccountServer:
 
     def __init__(self):
         logger.info("initializing server")
-        self.host = Config.listen_host
-        self.port = Config.listen_port
+        self.config = Config()
+        self.host = self.config.listen_host
+        self.port = self.config.listen_port
         self.resp_headers = {"Server": "pogoAccountServer"
                              }
         self.app = None
@@ -27,8 +28,8 @@ class AccountServer:
 
     def launch_server(self):
         self.app = Flask(__name__)
-        self.app.config['BASIC_AUTH_USERNAME'] = Config.auth_username
-        self.app.config['BASIC_AUTH_PASSWORD'] = Config.auth_password
+        self.app.config['BASIC_AUTH_USERNAME'] = self.config.auth_username
+        self.app.config['BASIC_AUTH_PASSWORD'] = self.config.auth_password
         basic_auth = BasicAuth(self.app)
         self.app.config['BASIC_AUTH_FORCE'] = True
         self.app.config['MAX_CONTENT_LENGTH'] = 16 * 1000 * 1000
