@@ -101,10 +101,9 @@ class AccountServer:
             return self.invalid_request()
         username = None
         pw = None
-        now = int(time.time())
-        cooldown_seconds = Config.cooldown_hours * 60 * 60
-        last_returned_limit = now - cooldown_seconds
-        reset = f"UPDATE accounts SET in_use_by = NULL, last_returned = '{now}' WHERE in_use_by = '{device}';"
+        last_returned_limit = self.config.get_cooldown_timestamp()
+        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}' WHERE "
+                 f" in_use_by = '{device}';")
         select = ("SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < "
                   f"{last_returned_limit} ORDER BY last_use ASC LIMIT 1;")
         with Db() as conn:
@@ -128,10 +127,7 @@ class AccountServer:
         return self.resp_ok({"username": username, "password": pw})
 
     def stats(self):
-        # TODO: doubled code
-        now = int(time.time())
-        cooldown_seconds = Config.cooldown_hours * 60 * 60
-        last_returned_limit = now - cooldown_seconds
+        last_returned_limit = self.config.get_cooldown_timestamp()
 
         cd_sql = f"SELECT count(*) from accounts WHERE last_returned >= {last_returned_limit}"
         in_use_sql = "SELECT count(*) from accounts WHERE in_use_by IS NOT NULL"
