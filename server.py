@@ -40,6 +40,7 @@ class AccountServer:
         self.app.add_url_rule("/get/<device>/leveling", "get_account_leveling", self.get_account_leveling, methods=['GET', 'POST'])
         self.app.add_url_rule("/get/<device>", "get_account", self.get_account, methods=['GET', 'POST'])
         self.app.add_url_rule("/set/<device>/level/<int:level>", "set_level", self.set_level, methods=['POST'])
+        self.app.add_url_rule("/set/<device>/burned", "set_burned", self.set_burned, methods=['POST'])
         self.app.add_url_rule("/stats", "stats", self.stats, methods=['GET'])
 
         werkzeug_logger = logging.getLogger("werkzeug")
@@ -107,8 +108,8 @@ class AccountServer:
         username = None
         pw = None
         last_returned_limit = self.config.get_cooldown_timestamp()
-        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}' WHERE "
-                 f" in_use_by = '{device}';")
+
+        reset = (f"UPDATE accounts SET in_use_by = NULL WHERE in_use_by = '{device}';")
         level_query = " AND level < 30" if leveling else " AND level >= 30"
         select = ("SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < "
                   f"{last_returned_limit} {level_query} ORDER BY last_use ASC LIMIT 1;")
@@ -147,6 +148,22 @@ class AccountServer:
             conn.cur.execute(update)
 
         return self.resp_ok()
+
+    def set_burned(self, device=None):
+        if not device:
+            return self.invalid_request()
+
+        name_sql = f"SELECT username FROM accounts WHERE in_use_by = '{device}'"
+        username = Db.get_single_results(name_sql)[0]
+
+        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}' WHERE "
+                 f" in_use_by = '{device}';")
+        with Db() as conn:
+            conn.cur.execute(reset)
+
+        logger.info(f"Request from {device} to burn account {username}")
+
+        return self.resp_ok({"username": username, "status": "burned"})
 
     def stats(self):
         last_returned_limit = self.config.get_cooldown_timestamp()
