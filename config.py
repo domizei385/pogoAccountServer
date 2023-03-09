@@ -3,7 +3,7 @@ import logging
 import time
 
 config = configparser.ConfigParser()
-config.read("config.ini")
+config.read("config/config.ini")
 
 logger = logging.getLogger(__name__)
 

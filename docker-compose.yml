@@ -1,0 +1,19 @@
+version: '2.4'
+services:
+  pogo_account_server:
+    container_name: pogo_account_server
+    image: pogo-account-server:latest
+    restart: always
+    environment:
+      TZ: Europe/Berlin
+      OMP_THREAD_LIMIT: 2
+    volumes:
+        #- /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./config/config.ini:/usr/src/app/config/config.ini
+      - ./mad/id_rsa:/root/.ssh/id_rsa  
+    networks:
+      - default
+    ports:
+      - "9008:9008"
+    
