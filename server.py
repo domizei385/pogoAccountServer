@@ -107,14 +107,21 @@ class AccountServer:
             return self.invalid_request()
         username = None
         pw = None
-        last_returned_limit = self.config.get_cooldown_timestamp()
 
         reset = (f"UPDATE accounts SET in_use_by = NULL WHERE in_use_by = '{device}';")
-        level_query = " AND level < 30" if leveling else " AND level >= 30"
-        select = ("SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < "
-                  f"{last_returned_limit} {level_query} ORDER BY last_use ASC LIMIT 1;")
         with Db() as conn:
             conn.cur.execute(reset)
+
+        # TODO: track last known account location and consider new location
+        # TODO: sticky accounts (prefern account reusage unless burned?)
+        # TODO: account pool by mad instance (to get around having to track account cooldown due to geographic distances)
+
+        level_query = " AND level < 30" if leveling else " AND level >= 30"
+        last_returned_limit = self.config.get_cooldown_timestamp()
+        last_use_limit = self.config.get_short_cooldown_timestamp()
+        select = ("SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < {last_returned_limit} AND last_use < "
+                  f"{last_use_limit} {level_query} ORDER BY last_use ASC LIMIT 1;")
+
         with Db() as conn:
             conn.cur.execute(select)
             for elem in conn.cur:
