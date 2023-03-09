@@ -20,8 +20,7 @@ class AccountServer:
         self.config = Config()
         self.host = self.config.listen_host
         self.port = self.config.listen_port
-        self.resp_headers = {"Server": "pogoAccountServer"
-                             }
+        self.resp_headers = {"Server": "pogoAccountServer"}
         self.app = None
         self.load_accounts_from_file()
         self.launch_server()
@@ -38,7 +37,9 @@ class AccountServer:
         self.app.add_url_rule('/<first>', "fallback", self.fallback, methods=['GET', 'POST'])
         self.app.add_url_rule('/<first>/<path:rest>', "fallback", self.fallback, methods=['GET', 'POST'])
 
+        self.app.add_url_rule("/get/<device>/leveling", "get_account_leveling", self.get_account_leveling, methods=['GET', 'POST'])
         self.app.add_url_rule("/get/<device>", "get_account", self.get_account, methods=['GET', 'POST'])
+        self.app.add_url_rule("/set/<device>/level/<int:level>", "set_level", self.set_level, methods=['POST'])
         self.app.add_url_rule("/stats", "stats", self.stats, methods=['GET'])
 
         werkzeug_logger = logging.getLogger("werkzeug")
@@ -97,7 +98,10 @@ class AccountServer:
             logger.info(f"GET request to fallback at {first}/{rest}")
         return self.invalid_request()
 
-    def get_account(self, device=None):
+    def get_account_leveling(self, device=None):
+        return self.get_account(device, True)
+
+    def get_account(self, device=None, leveling=False):
         if not device:
             return self.invalid_request()
         username = None
@@ -105,8 +109,9 @@ class AccountServer:
         last_returned_limit = self.config.get_cooldown_timestamp()
         reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}' WHERE "
                  f" in_use_by = '{device}';")
+        level_query = " AND level < 30" if leveling else " AND level >= 30"
         select = ("SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < "
-                  f"{last_returned_limit} ORDER BY last_use ASC LIMIT 1;")
+                  f"{last_returned_limit} {level_query} ORDER BY last_use ASC LIMIT 1;")
         with Db() as conn:
             conn.cur.execute(reset)
         with Db() as conn:
@@ -123,21 +128,38 @@ class AccountServer:
                      f"username = '{username}';")
         with Db() as conn:
             conn.cur.execute(mark_used)
-        logger.info(f"Request from {device}: return {username=}, {pw=}")
+        logger.info(f"Request from {device}(leveling={leveling}) return {username=}, {pw=}")
         logger.info(self.stats())
         return self.resp_ok({"username": username, "password": pw})
+
+    def set_level(self, device=None, level:int=None):
+        if not device or not level:
+            return self.invalid_request()
+
+        check_update = f"SELECT count(*) FROM accounts WHERE in_use_by = '{device}' AND level <> {level}"
+        if not int(Db.get_single_results(check_update)[0]):
+            logger.debug(f"Request for device {device}")
+            return self.resp_ok()
+
+        logger.info(f"Request from {device} to set level to {level}")
+        update = (f"UPDATE accounts SET level = {level} WHERE in_use_by = '{device}';")
+        with Db() as conn:
+            conn.cur.execute(update)
+
+        return self.resp_ok()
 
     def stats(self):
         last_returned_limit = self.config.get_cooldown_timestamp()
 
         cd_sql = f"SELECT count(*) from accounts WHERE last_returned >= {last_returned_limit}"
         in_use_sql = "SELECT count(*) from accounts WHERE in_use_by IS NOT NULL"
+        unleveled_sql = "SELECT count(*) from accounts WHERE level < 30"
         total_sql = "SELECT count(*) from accounts"
 
-        cd, in_use, total = Db.get_single_results(cd_sql, in_use_sql, total_sql)
+        cd, in_use, unleveled, total = Db.get_single_results(cd_sql, in_use_sql, unleveled_sql, total_sql)
         available = total - in_use - cd
 
-        return {"accounts": total, "in_use": in_use, "cooldown": cd, "available": available}
+        return {"accounts": total, "in_use": in_use, "cooldown": cd, "unleveled": unleveled, "available": available}
 
 
 if __name__ == "__main__":
