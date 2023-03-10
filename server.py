@@ -130,6 +130,7 @@ class AccountServer:
             region = request.args.get('region', default='', type=str)
             region_query = f" AND (region IS NULL OR region = '' OR region = '{region}')" if region != '' else ""
 
+            last_returned_limit = self.config.get_cooldown_timestamp()
             last_use_limit = self.config.get_short_cooldown_timestamp()
             select = (f"SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < {last_returned_limit} AND last_use < "
                       f"{last_use_limit} {level_query} {region_query} ORDER BY last_use ASC LIMIT 1;")
