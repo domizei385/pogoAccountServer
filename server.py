@@ -99,46 +99,56 @@ class AccountServer:
         return self.invalid_request()
 
     def get_account(self, device=None):
+        # TODO: track last known account location and consider new location
+        # TODO: account pool by mad instance (to get around having to track account cooldown due to geographic distances)
         logger.info(f"get_account: leveling={request.args.get('leveling')}, region={request.args.get('region', default='', type=str)}")
         if not device:
             return self.invalid_request()
         username = None
         pw = None
 
-        # TODO: sticky accounts (prefer account reusage unless burned?)
+        reason = request.args.get('reason') # None, level, maintenance, rotation, level, teleport
 
-        reset = (f"UPDATE accounts SET in_use_by = NULL WHERE in_use_by = '{device}';")
-        with Db() as conn:
-            conn.cur.execute(reset)
+        # sticky accounts (prefer account reusage unless burned)
+        if not reason:
+            last_returned_limit = self.config.get_cooldown_timestamp()
+            select = f"SELECT username, password from accounts WHERE in_use_by = '{device}' AND last_returned < {last_returned_limit} LIMIT 1;"
+            with Db() as conn:
+                conn.cur.execute(select)
+                for elem in conn.cur:
+                    username = elem[0]
+                    pw = elem[1]
+                    break
 
-        # TODO: track last known account location and consider new location
-
-        # TODO: account pool by mad instance (to get around having to track account cooldown due to geographic distances)
-
-        level_query = " AND level < 30" if request.args.get('leveling') == 1 else " AND level >= 30"
-        region = request.args.get('region', default='', type=str)
-        region_query = f" AND (region IS NULL OR region = '' OR region = '{region}')" if region != '' else ""
-
-        last_returned_limit = self.config.get_cooldown_timestamp()
-        last_use_limit = self.config.get_short_cooldown_timestamp()
-        select = (f"SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < {last_returned_limit} AND last_use < "
-                  f"{last_use_limit} {level_query} {region_query} ORDER BY last_use ASC LIMIT 1;")
-        logger.info(select)
-        with Db() as conn:
-            conn.cur.execute(select)
-            for elem in conn.cur:
-                username = elem[0]
-                pw = elem[1]
-                break
         if not username or not pw:
-            logger.warning(f"Unable to return an account for {device}")
-            return self.invalid_request({"error": "No accounts available"})
+            reset = (f"UPDATE accounts SET in_use_by = NULL WHERE in_use_by = '{device}';")
+            with Db() as conn:
+                conn.cur.execute(reset)
+
+            # new account
+            level_query = " AND level < 30" if int(request.args.get('leveling')) == 1 else " AND level >= 30"
+            region = request.args.get('region', default='', type=str)
+            region_query = f" AND (region IS NULL OR region = '' OR region = '{region}')" if region != '' else ""
+
+            last_use_limit = self.config.get_short_cooldown_timestamp()
+            select = (f"SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < {last_returned_limit} AND last_use < "
+                      f"{last_use_limit} {level_query} {region_query} ORDER BY last_use ASC LIMIT 1;")
+            logger.info(select)
+            with Db() as conn:
+                conn.cur.execute(select)
+                for elem in conn.cur:
+                    username = elem[0]
+                    pw = elem[1]
+                    break
+            if not username or not pw:
+                logger.warning(f"Unable to return an account for {device}")
+                return self.invalid_request({"error": "No accounts available"})
 
         mark_used = (f"UPDATE accounts SET in_use_by = '{device}', last_use = '{int(time.time())}' WHERE "
                      f"username = '{username}';")
         with Db() as conn:
             conn.cur.execute(mark_used)
-        logger.info(f"Request from {device}(leveling={request.args.get('leveling')}) return {username=}, {pw=}")
+        logger.info(f"Request from {device}(leveling={request.args.get('leveling')}, reason={reason}) return {username=}, {pw=}")
         logger.info(self.stats())
         return self.resp_ok({"username": username, "password": pw})
 
