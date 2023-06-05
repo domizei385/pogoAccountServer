@@ -212,6 +212,7 @@ class AccountServer:
 
     def stats(self):
         last_returned_limit = self.config.get_cooldown_timestamp()
+        last_use_limit = self.config.get_short_cooldown_timestamp()
 
         regions = ["EU", "US"]
         result = {}
@@ -222,8 +223,8 @@ class AccountServer:
             cd_sql = f"SELECT count(*) FROM accounts WHERE last_returned >= {last_returned_limit} AND {region_query}"
             in_use_sql = f"SELECT count(*) FROM accounts WHERE in_use_by IS NOT NULL AND {region_query}"  # consider added last_updated check
             unleveled_sql = f"SELECT count(*) FROM accounts WHERE level < 30 AND {region_query}"
-            available_leveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND in_use_by IS NULL AND {region_query} AND level >= 30"
-            available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND in_use_by IS NULL AND {region_query} AND level < 30"
+            available_leveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND last_use < {last_use_limit} AND in_use_by IS NULL AND {region_query} AND level >= 30"
+            available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND last_use < {last_use_limit} AND in_use_by IS NULL AND {region_query} AND level < 30"
             total_sql = f"SELECT count(*) FROM accounts WHERE {region_query}"
 
             cooldown, in_use, unleveled, total, a_leveled, a_unleveled = Db.get_single_results(cd_sql, in_use_sql, unleveled_sql, total_sql, available_leveled_sql,
@@ -244,8 +245,8 @@ class AccountServer:
 
         cd_sql = f"SELECT count(*) FROM accounts WHERE last_returned >= {last_returned_limit} AND region IS NULL"
         in_use_sql = "SELECT count(*) FROM accounts WHERE in_use_by IS NOT NULL AND region IS NULL"
-        available_leveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND in_use_by IS NULL AND region IS NULL AND level >= 30"
-        available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND in_use_by IS NULL AND region IS NULL AND level < 30"
+        available_leveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND last_use < {last_use_limit} AND in_use_by IS NULL AND region IS NULL AND level >= 30"
+        available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND last_use < {last_use_limit} AND in_use_by IS NULL AND region IS NULL AND level < 30"
         unleveled_sql = "SELECT count(*) FROM accounts WHERE level < 30 AND region IS NULL"
         total_sql = "SELECT count(*) FROM accounts WHERE region IS NULL"
 
