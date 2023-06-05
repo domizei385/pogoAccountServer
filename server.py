@@ -155,7 +155,7 @@ class AccountServer:
         with Db() as conn:
             conn.cur.execute(mark_used)
         # logger.info(f"Request from {device}(leveling={request.args.get('leveling')}, reason={reason}) return {username=}, {pw=}")
-        logger.info(self.stats())
+        logger.debug(self.stats())
         return self.resp_ok(data={"username": username, "password": pw})
 
     def set_level(self, device=None, level: int = None):
