@@ -103,8 +103,11 @@ class AccountServer:
         # TODO: track last known account location and consider new location?
         if not device:
             return self.invalid_request()
+        leveling = request.args.get('leveling', default=False, type=bool)
+        level_query = " AND level < 30" if leveling else " AND level >= 30"
+
         logger.info(
-            f"get_account({device}): leveling={request.args.get('leveling')}, region={request.args.get('region', default='', type=str)}, reason={request.args.get('reason', default='', type=str)}")
+            f"get_account({device}): leveling={leveling}, region={request.args.get('region', default='', type=str)}, reason={request.args.get('reason', default='', type=str)}")
 
         username = None
         pw = None
@@ -114,7 +117,7 @@ class AccountServer:
         # sticky accounts (prefer account reusage unless burned)
         if not reason:
             last_returned_limit = self.config.get_cooldown_timestamp()
-            select = f"SELECT username, password from accounts WHERE in_use_by = '{device}' AND last_returned < {last_returned_limit} LIMIT 1;"
+            select = f"SELECT username, password from accounts WHERE in_use_by = '{device}' AND last_returned < {last_returned_limit} {level_query} LIMIT 1;"
             with Db() as conn:
                 conn.cur.execute(select)
                 for elem in conn.cur:
@@ -128,7 +131,6 @@ class AccountServer:
                 conn.cur.execute(reset)
 
             # new account
-            level_query = " AND level < 30" if int(request.args.get('leveling')) == 1 else " AND level >= 30"
             region = request.args.get('region', default='', type=str)
             region_query = f" AND (region IS NULL OR region = '' OR region = '{region}')" if region != '' else ""
 
@@ -185,6 +187,7 @@ class AccountServer:
                 break
 
         if not username:
+            logger.info(f"Device {device} has not claimed any username")
             return self.resp_ok()
         logger.info(f"Request from {device} to burn account {username} (acquired {last_used - time.time()} s ago)")
 
