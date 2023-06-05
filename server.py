@@ -126,6 +126,7 @@ class AccountServer:
                     break
 
         if not username or not pw:
+            # drop any previous usage of requesting device
             reset = (f"UPDATE accounts SET in_use_by = NULL, last_updated = '{int(time.time())}' WHERE in_use_by = '{device}';")
             with Db() as conn:
                 conn.cur.execute(reset)
@@ -187,9 +188,9 @@ class AccountServer:
                 break
 
         if not username:
-            logger.info(f"Device {device} has not claimed any username")
+            logger.info(f"Unable to burn as device {device} has not claimed any username.")
             return self.resp_ok()
-        logger.info(f"Request from {device} to burn account {username} (acquired {last_used - time.time()} s ago)")
+        logger.info(f"Request from {device} to burn account {username} (acquired {(time.time()-last_used)/60/60} h ago)")
 
         args = request.get_json()
         last_reason = ''
