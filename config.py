@@ -16,7 +16,8 @@ class Config:
     auth_password = general.get("auth_password", None)
     cooldown_hours = general.getint("cooldown", 24)
     cooldown_seconds = cooldown_hours * 60 * 60
-    short_cooldown_seconds = 3 * 60 * 60
+    short_cooldown_hours = general.getint("cooldown_reuse", 3)
+    short_cooldown_seconds = short_cooldown_hours * 60 * 60
 
     database = config["database"]
     db_host = database.get("host", "127.0.0.1")
