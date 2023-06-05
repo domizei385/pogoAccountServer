@@ -193,6 +193,7 @@ class AccountServer:
         logger.info(f"Request from {device} to burn account {username} (acquired {(time.time()-last_used)/60/60} h ago)")
 
         args = request.get_json()
+        print(args)
         last_reason = ''
         if 'reason' in args:
             last_reason = args['reason']
@@ -203,9 +204,10 @@ class AccountServer:
         with Db() as conn:
             conn.cur.execute(reset)
 
-        history = (f"INSERT INTO accounts_history SET username = '{username}', acquired = '{int(last_used)}', burned = '{int(time.time())}', reason = '{last_reason}'")
+        encounters = 0
         if 'encounters' in args:
-            history.__add__(f", encounters = '{int(args['encounters'])}'")
+            encounters = int(args['encounters'])
+        history = (f"INSERT INTO accounts_history SET username = '{username}', acquired = '{int(last_used)}', burned = '{int(time.time())}', reason = '{last_reason}', encounters = {encounters}")
         with Db() as conn:
             conn.cur.execute(history)
 
