@@ -20,7 +20,7 @@ class AccountServer:
         self.config = Config()
         self.host = self.config.listen_host
         self.port = self.config.listen_port
-        self.resp_headers = {"Server": "pogoAccountServer"}
+        self.resp_headers = {"Server": "pogoAccountServer", 'Content-Type': 'application/json'}
         self.app = None
         self.load_accounts_from_file()
         self.launch_server()
@@ -72,22 +72,23 @@ class AccountServer:
             conn.conn.commit()
         return True
 
-    def resp_ok(self, data=None):
+    def resp_ok(self, code=200, data=None):
         standard = {"status": "ok"}
         if data is None:
             data = standard
         if "status" not in data:
             data = {"status": "ok", "data": data}
         if not data == standard:
-            logger.debug(f"responding with 200, data: {data}")
-        return data, 200, self.resp_headers
+            logger.debug(f"responding with {code}, data: {data}")
+        return data, code, self.resp_headers
 
-    def invalid_request(self, data=None, code=400):
+    def invalid_request(self, data=None, code=400, logging=True):
         if data is None:
             data = {"status": "fail"}
         if "status" not in data:
             data = {"status": "fail", "data": data}
-        logger.info(f"responding with 400, data: {data}")
+        if logging:
+            logger.warning(f"responding with {code}, data: {data}")
         return data, code, self.resp_headers
 
     def fallback(self, first=None, rest=None):
@@ -99,15 +100,16 @@ class AccountServer:
         return self.invalid_request()
 
     def get_account(self, device=None):
-        # TODO: track last known account location and consider new location
-        # TODO: account pool by mad instance (to get around having to track account cooldown due to geographic distances)
-        logger.info(f"get_account: leveling={request.args.get('leveling')}, region={request.args.get('region', default='', type=str)}")
+        # TODO: track last known account location and consider new location?
         if not device:
             return self.invalid_request()
+        logger.info(
+            f"get_account({device}): leveling={request.args.get('leveling')}, region={request.args.get('region', default='', type=str)}, reason={request.args.get('reason', default='', type=str)}")
+
         username = None
         pw = None
 
-        reason = request.args.get('reason') # None, level, maintenance, rotation, level, teleport
+        reason = request.args.get('reason')  # None, level, maintenance, rotation, level, teleport, limit
 
         # sticky accounts (prefer account reusage unless burned)
         if not reason:
@@ -121,7 +123,7 @@ class AccountServer:
                     break
 
         if not username or not pw:
-            reset = (f"UPDATE accounts SET in_use_by = NULL WHERE in_use_by = '{device}';")
+            reset = (f"UPDATE accounts SET in_use_by = NULL, last_updated = '{int(time.time())}' WHERE in_use_by = '{device}';")
             with Db() as conn:
                 conn.cur.execute(reset)
 
@@ -132,9 +134,9 @@ class AccountServer:
 
             last_returned_limit = self.config.get_cooldown_timestamp()
             last_use_limit = self.config.get_short_cooldown_timestamp()
-            select = (f"SELECT username, password from accounts WHERE in_use_by is NULL AND last_returned < {last_returned_limit} AND last_use < "
+            select = (f"SELECT username, password from accounts WHERE in_use_by IS NULL AND last_returned < {last_returned_limit} AND last_use < "
                       f"{last_use_limit} {level_query} {region_query} ORDER BY last_use ASC LIMIT 1;")
-            logger.info(select)
+            logger.debug(select)
             with Db() as conn:
                 conn.cur.execute(select)
                 for elem in conn.cur:
@@ -142,18 +144,18 @@ class AccountServer:
                     pw = elem[1]
                     break
             if not username or not pw:
-                logger.warning(f"Unable to return an account for {device}")
-                return self.invalid_request({"error": "No accounts available"})
+                logger.debug(f"Unable to return an account for {device}")
+                return self.resp_ok(code=204, data={"error": "No accounts available"})
 
-        mark_used = (f"UPDATE accounts SET in_use_by = '{device}', last_use = '{int(time.time())}' WHERE "
+        mark_used = (f"UPDATE accounts SET in_use_by = '{device}', last_use = '{int(time.time())}', last_updated = '{int(time.time())}', last_reason = NULL WHERE "
                      f"username = '{username}';")
         with Db() as conn:
             conn.cur.execute(mark_used)
-        logger.info(f"Request from {device}(leveling={request.args.get('leveling')}, reason={reason}) return {username=}, {pw=}")
+        # logger.info(f"Request from {device}(leveling={request.args.get('leveling')}, reason={reason}) return {username=}, {pw=}")
         logger.info(self.stats())
-        return self.resp_ok({"username": username, "password": pw})
+        return self.resp_ok(data={"username": username, "password": pw})
 
-    def set_level(self, device=None, level:int=None):
+    def set_level(self, device=None, level: int = None):
         if not device or not level:
             return self.invalid_request()
 
@@ -163,7 +165,7 @@ class AccountServer:
             return self.resp_ok()
 
         logger.info(f"Request from {device} to set level to {level}")
-        update = (f"UPDATE accounts SET level = {level} WHERE in_use_by = '{device}';")
+        update = (f"UPDATE accounts SET level = {level}, last_updated = '{int(time.time())}' WHERE in_use_by = '{device}';")
         with Db() as conn:
             conn.cur.execute(update)
 
@@ -173,30 +175,94 @@ class AccountServer:
         if not device:
             return self.invalid_request()
 
-        name_sql = f"SELECT username FROM accounts WHERE in_use_by = '{device}'"
-        username = Db.get_single_results(name_sql)[0]
+        username = None
+        claimed_sql = f"SELECT username, last_use FROM accounts WHERE in_use_by = '{device}'"
+        with Db() as conn:
+            conn.cur.execute(claimed_sql)
+            for elem in conn.cur:
+                username = elem[0]
+                last_used = int(elem[1])
+                break
 
-        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}' WHERE "
-                 f" in_use_by = '{device}';")
+        if not username:
+            return self.resp_ok()
+        logger.info(f"Request from {device} to burn account {username} (acquired {last_used - time.time()} s ago)")
+
+        args = request.get_json()
+        last_reason = ''
+        if 'reason' in args:
+            last_reason = args['reason']
+
+        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}', last_updated = '{int(time.time())}',"
+                 f" last_reason = '{last_reason}' WHERE in_use_by = '{device}';")
+
         with Db() as conn:
             conn.cur.execute(reset)
 
-        logger.info(f"Request from {device} to burn account {username}")
+        history = (f"INSERT INTO accounts_history SET username = '{username}', acquired = '{int(last_used)}', burned = '{int(time.time())}', reason = '{last_reason}'")
+        if 'encounters' in args:
+            history.__add__(f", encounters = '{int(args['encounters'])}'")
+        with Db() as conn:
+            conn.cur.execute(history)
 
-        return self.resp_ok({"username": username, "status": "burned"})
+        return self.resp_ok(data={"username": username, "status": "burned"})
 
     def stats(self):
         last_returned_limit = self.config.get_cooldown_timestamp()
 
-        cd_sql = f"SELECT count(*) from accounts WHERE last_returned >= {last_returned_limit}"
-        in_use_sql = "SELECT count(*) from accounts WHERE in_use_by IS NOT NULL"
-        unleveled_sql = "SELECT count(*) from accounts WHERE level < 30"
-        total_sql = "SELECT count(*) from accounts"
+        regions = ["EU", "US"]
+        result = {}
 
-        cd, in_use, unleveled, total = Db.get_single_results(cd_sql, in_use_sql, unleveled_sql, total_sql)
-        available = total - in_use - cd
+        for region in regions:
+            region_query = f"(region = '{region}' OR region IS NULL)"
 
-        return {"accounts": total, "in_use": in_use, "cooldown": cd, "unleveled": unleveled, "available": available}
+            cd_sql = f"SELECT count(*) FROM accounts WHERE last_returned >= {last_returned_limit} AND {region_query}"
+            in_use_sql = f"SELECT count(*) FROM accounts WHERE in_use_by IS NOT NULL AND {region_query}"  # consider added last_updated check
+            unleveled_sql = f"SELECT count(*) FROM accounts WHERE level < 30 AND {region_query}"
+            available_leveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND in_use_by IS NULL AND {region_query} AND level >= 30"
+            available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND in_use_by IS NULL AND {region_query} AND level < 30"
+            total_sql = f"SELECT count(*) FROM accounts WHERE {region_query}"
+
+            cooldown, in_use, unleveled, total, a_leveled, a_unleveled = Db.get_single_results(cd_sql, in_use_sql, unleveled_sql, total_sql, available_leveled_sql,
+                                                                                               available_unleveled_sql)
+            result[region] = {
+                "total": {
+                    "accounts": total,
+                    "in_use": in_use,
+                    "cooldown": cooldown,
+                    "unleveled": unleveled
+                },
+                "available": {
+                    "total": a_leveled + a_unleveled,
+                    "leveled": a_leveled,
+                    "unleveled": a_unleveled
+                }
+            }
+
+        cd_sql = f"SELECT count(*) FROM accounts WHERE last_returned >= {last_returned_limit} AND region IS NULL"
+        in_use_sql = "SELECT count(*) FROM accounts WHERE in_use_by IS NOT NULL AND region IS NULL"
+        available_leveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND in_use_by IS NULL AND region IS NULL AND level >= 30"
+        available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND in_use_by IS NULL AND region IS NULL AND level < 30"
+        unleveled_sql = "SELECT count(*) FROM accounts WHERE level < 30 AND region IS NULL"
+        total_sql = "SELECT count(*) FROM accounts WHERE region IS NULL"
+
+        cooldown, in_use, unleveled, total, a_leveled, a_unleveled = Db.get_single_results(cd_sql, in_use_sql, unleveled_sql, total_sql, available_leveled_sql,
+                                                                                           available_unleveled_sql)
+
+        result['shared'] = {
+            "total": {
+                "accounts": total,
+                "in_use": in_use,
+                "cooldown": cooldown,
+                "unleveled": unleveled
+            },
+            "available": {
+                "total": a_leveled + a_unleveled,
+                "leveled": a_leveled,
+                "unleveled": a_unleveled
+            }
+        }
+        return result, 200, self.resp_headers
 
 
 if __name__ == "__main__":
