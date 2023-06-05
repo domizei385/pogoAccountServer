@@ -106,7 +106,7 @@ class AccountServer:
         leveling = request.args.get('leveling', default=False, type=bool)
         level_query = " AND level < 30" if leveling else " AND level >= 30"
 
-        logger.info(
+        logger.debug(
             f"get_account({device}): leveling={leveling}, region={request.args.get('region', default='', type=str)}, reason={request.args.get('reason', default='', type=str)}")
 
         username = None
