@@ -103,7 +103,7 @@ class AccountServer:
         # TODO: track last known account location and consider new location?
         if not device:
             return self.invalid_request()
-        leveling = request.args.get('leveling', default=False, type=bool)
+        leveling = request.args.get('leveling', default=0, type=int)
         level_query = " AND level < 30" if leveling else " AND level >= 30"
 
         logger.debug(
