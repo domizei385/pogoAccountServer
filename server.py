@@ -42,6 +42,7 @@ class AccountServer:
         self.app.add_url_rule("/get/<device>/info", "get_account_info", self.get_account_info, methods=['GET'])
         self.app.add_url_rule("/set/<device>/level/<int:level>", "set_level", self.set_level, methods=['POST'])
         self.app.add_url_rule("/set/<device>/burned", "set_burned", self.set_burned, methods=['POST'])
+        self.app.add_url_rule("/set/<device>/logout", "set_logout", self.set_logout, methods=['POST'])
         self.app.add_url_rule("/stats", "stats", self.stats, methods=['GET'])
 
         werkzeug_logger = logging.getLogger("werkzeug")
@@ -216,6 +217,43 @@ class AccountServer:
             conn.cur.execute(update)
 
         return self.resp_ok()
+
+    def set_logout(self, device=None):
+        if not device:
+            return self.invalid_request()
+
+        username = None
+        claimed_sql = f"SELECT username, last_use FROM accounts WHERE in_use_by = '{device}'"
+        with Db() as conn:
+            conn.cur.execute(claimed_sql)
+            for elem in conn.cur:
+                username = elem[0]
+                last_used = int(elem[1])
+                break
+
+        if not username:
+            logger.info(f"Unable to logout {device} as it has no assignment.")
+            return self.resp_ok()
+        logger.info(f"Request from {device} to logout {username} (acquired {(time.time() - last_used) / 60 / 60} h ago)")
+
+        args = request.get_json()
+
+        # TODO: track encounters with account and return total encounters through "get_account"
+        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}', last_updated = '{int(time.time())}',"
+                 f" last_reason = NULL WHERE in_use_by = '{device}';")
+
+        with Db() as conn:
+            conn.cur.execute(reset)
+
+        encounters = 0
+        if 'encounters' in args:
+            encounters = int(args['encounters'])
+        history = (
+            f"INSERT INTO accounts_history SET username = '{username}', acquired = '{int(last_used)}', burned = '{int(time.time())}', reason = 'logout', encounters = {encounters}")
+        with Db() as conn:
+            conn.cur.execute(history)
+
+        return self.resp_ok(data={"username": username, "status": "logged out"})
 
     def set_burned(self, device=None):
         if not device:
