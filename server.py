@@ -37,6 +37,7 @@ class AccountServer:
         self.app.add_url_rule('/<first>', "fallback", self.fallback, methods=['GET', 'POST'])
         self.app.add_url_rule('/<first>/<path:rest>', "fallback", self.fallback, methods=['GET', 'POST'])
 
+        self.app.add_url_rule("/get/availability", "get_availability", self.get_availability, methods=['GET'])
         self.app.add_url_rule("/get/<device>", "get_account", self.get_account, methods=['GET', 'POST'])
         self.app.add_url_rule("/set/<device>/level/<int:level>", "set_level", self.set_level, methods=['POST'])
         self.app.add_url_rule("/set/<device>/burned", "set_burned", self.set_burned, methods=['POST'])
@@ -99,6 +100,28 @@ class AccountServer:
             logger.info(f"GET request to fallback at {first}/{rest}")
         return self.invalid_request()
 
+    def get_availability(self):
+        device = request.args.get('device', default='', type=str)
+        leveling = request.args.get('leveling', default=0, type=int)
+        region = request.args.get('region', default='', type=str)
+        logger.info(f"get_availability({device}): leveling={leveling}, region={region}")
+        last_returned_limit = self.config.get_cooldown_timestamp()
+
+        last_returned_query = f" AND (last_returned IS NULL OR last_returned < {last_returned_limit})"
+        level_query = " AND level < 30" if leveling else " AND level >= 30"
+        is_reuse = f"SELECT 1 from accounts WHERE in_use_by = '{device}' {level_query} {last_returned_query} LIMIT 1;"
+        resp = Db.get_single_results(is_reuse)
+        if resp[0]:
+            # we can reuse the account
+            return self.resp_ok(data={"available": int(resp[0]), "type": "reuse"})
+        all_stats = self._stats_data()
+
+        region_stats = all_stats[region] if region else all_stats['shared']
+        node_available = region_stats['available']
+        available = int(node_available['unleveled']) if leveling else int(node_available['leveled'])
+
+        return self.resp_ok(data={"available": available, "type": "pool"})
+
     def get_account(self, device=None):
         # TODO: track last known account location and consider new location?
         if not device:
@@ -117,7 +140,8 @@ class AccountServer:
         # sticky accounts (prefer account reusage unless burned)
         if not reason:
             last_returned_limit = self.config.get_cooldown_timestamp()
-            select = f"SELECT username, password from accounts WHERE in_use_by = '{device}' AND last_returned < {last_returned_limit} {level_query} LIMIT 1;"
+            last_returned_query = f" AND (last_returned IS NULL OR last_returned < {last_returned_limit})"
+            select = f"SELECT username, password from accounts WHERE in_use_by = '{device}' {last_returned_query} {level_query} LIMIT 1;"
             with Db() as conn:
                 conn.cur.execute(select)
                 for elem in conn.cur:
@@ -213,7 +237,7 @@ class AccountServer:
 
         return self.resp_ok(data={"username": username, "status": "burned"})
 
-    def stats(self):
+    def _stats_data(self):
         last_returned_limit = self.config.get_cooldown_timestamp()
         last_use_limit = self.config.get_short_cooldown_timestamp()
 
@@ -269,7 +293,10 @@ class AccountServer:
                 "unleveled": a_unleveled
             }
         }
-        return result, 200, self.resp_headers
+        return result
+
+    def stats(self):
+        return self._stats_data(), 200, self.resp_headers
 
 
 if __name__ == "__main__":
