@@ -39,6 +39,7 @@ class AccountServer:
 
         self.app.add_url_rule("/get/availability", "get_availability", self.get_availability, methods=['GET'])
         self.app.add_url_rule("/get/<device>", "get_account", self.get_account, methods=['GET', 'POST'])
+        self.app.add_url_rule("/get/<device>/info", "get_account_info", self.get_account_info, methods=['GET'])
         self.app.add_url_rule("/set/<device>/level/<int:level>", "set_level", self.set_level, methods=['POST'])
         self.app.add_url_rule("/set/<device>/burned", "set_burned", self.set_burned, methods=['POST'])
         self.app.add_url_rule("/stats", "stats", self.stats, methods=['GET'])
@@ -122,6 +123,21 @@ class AccountServer:
 
         return self.resp_ok(data={"available": available, "type": "pool"})
 
+    def get_account_info(self, device=None):
+        if not device:
+            return self.invalid_request()
+
+        logger.debug(f"get_assignment_info({device})")
+
+        select = f"SELECT username,level,last_returned,last_reason from accounts WHERE in_use_by = '{device}' LIMIT 1;"
+        with Db() as conn:
+            conn.cur.execute(select)
+            for elem in conn.cur:
+                last_returned_limit = self.config.get_cooldown_timestamp()
+                is_burnt = last_returned_limit < int(elem[2])
+                return self.resp_ok(data={"username": elem[0], "level": elem[1], "last_returned": elem[2], "last_reason": elem[3], "is_burnt": 1 if is_burnt else 0})
+        return self.resp_ok(code=204)
+
     def get_account(self, device=None):
         # TODO: track last known account location and consider new location?
         if not device:
@@ -134,6 +150,7 @@ class AccountServer:
 
         username = None
         pw = None
+        level = None
 
         reason = request.args.get('reason')  # None, level, maintenance, rotation, level, teleport, limit
 
@@ -141,12 +158,13 @@ class AccountServer:
         if not reason:
             last_returned_limit = self.config.get_cooldown_timestamp()
             last_returned_query = f" AND (last_returned IS NULL OR last_returned < {last_returned_limit})"
-            select = f"SELECT username, password from accounts WHERE in_use_by = '{device}' {last_returned_query} {level_query} LIMIT 1;"
+            select = f"SELECT username, password, level from accounts WHERE in_use_by = '{device}' {last_returned_query} {level_query} LIMIT 1;"
             with Db() as conn:
                 conn.cur.execute(select)
                 for elem in conn.cur:
                     username = elem[0]
                     pw = elem[1]
+                    level = elem[2]
                     break
 
         if not username or not pw:
@@ -161,7 +179,7 @@ class AccountServer:
 
             last_returned_limit = self.config.get_cooldown_timestamp()
             last_use_limit = self.config.get_short_cooldown_timestamp()
-            select = (f"SELECT username, password from accounts WHERE in_use_by IS NULL AND last_returned < {last_returned_limit} AND last_use < "
+            select = (f"SELECT username, password, level from accounts WHERE in_use_by IS NULL AND last_returned < {last_returned_limit} AND last_use < "
                       f"{last_use_limit} {level_query} {region_query} ORDER BY last_use ASC LIMIT 1;")
             logger.debug(select)
             with Db() as conn:
@@ -169,6 +187,7 @@ class AccountServer:
                 for elem in conn.cur:
                     username = elem[0]
                     pw = elem[1]
+                    level = elem[2]
                     break
             if not username or not pw:
                 logger.debug(f"Unable to return an account for {device}")
@@ -180,7 +199,7 @@ class AccountServer:
             conn.cur.execute(mark_used)
         # logger.info(f"Request from {device}(leveling={request.args.get('leveling')}, reason={reason}) return {username=}, {pw=}")
         logger.debug(self.stats())
-        return self.resp_ok(data={"username": username, "password": pw})
+        return self.resp_ok(data={"username": username, "password": pw, "level": level})
 
     def set_level(self, device=None, level: int = None):
         if not device or not level:
@@ -214,7 +233,7 @@ class AccountServer:
         if not username:
             logger.info(f"Unable to burn as device {device} has not claimed any username.")
             return self.resp_ok()
-        logger.info(f"Request from {device} to burn account {username} (acquired {(time.time()-last_used)/60/60} h ago)")
+        logger.info(f"Request from {device} to burn account {username} (acquired {(time.time() - last_used) / 60 / 60} h ago)")
 
         args = request.get_json()
         print(args)
@@ -231,7 +250,8 @@ class AccountServer:
         encounters = 0
         if 'encounters' in args:
             encounters = int(args['encounters'])
-        history = (f"INSERT INTO accounts_history SET username = '{username}', acquired = '{int(last_used)}', burned = '{int(time.time())}', reason = '{last_reason}', encounters = {encounters}")
+        history = (
+            f"INSERT INTO accounts_history SET username = '{username}', acquired = '{int(last_used)}', burned = '{int(time.time())}', reason = '{last_reason}', encounters = {encounters}")
         with Db() as conn:
             conn.cur.execute(history)
 
