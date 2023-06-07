@@ -256,7 +256,7 @@ class AccountServer:
         encounters = 0
         if 'encounters' in args:
             encounters = int(args['encounters'])
-        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), burned=None, reason='logout', encounters=encounters)
+        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), returned=None, reason='logout', encounters=encounters)
 
         return self.resp_ok(data={"username": username, "status": "logged out"})
 
@@ -296,15 +296,15 @@ class AccountServer:
         encounters = 0
         if 'encounters' in args:
             encounters = int(args['encounters'])
-        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), burned=DatetimeWrapper.now(), reason=last_reason, encounters=encounters)
+        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), reason=last_reason, encounters=encounters)
 
         return self.resp_ok(data={"username": username, "status": "burned"})
 
-    def _write_history(self, username: str, device: str, acquired: Optional[datetime.datetime], burned: Optional[datetime.datetime], reason, encounters):
+    def _write_history(self, username: str, device: str, acquired: Optional[datetime.datetime], reason: str, encounters: int, returned: Optional[datetime.datetime]=DatetimeWrapper.now()):
         acquired_sql = f", acquired = '{acquired}'" if acquired else ''
-        burned_sql = f", burned = '{burned}'" if burned else ''
+        returned_sql = f", returned = '{returned}'" if returned else ''
         history = (
-            f"INSERT INTO accounts_history SET username = '{username}', device = '{device}' {acquired_sql} {burned_sql}, reason = '{reason}', encounters = {encounters}")
+            f"INSERT INTO accounts_history SET username = '{username}', device = '{device}' {acquired_sql} {returned_sql}, reason = '{reason}', encounters = {encounters}")
         with Db() as conn:
             conn.cur.execute(history)
 
