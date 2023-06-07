@@ -1,10 +1,14 @@
+import datetime
 import logging
 import os
 import sys
 import time
+from typing import Optional
+
 from flask import Flask, request
 from flask_basicauth import BasicAuth
 
+from DatetimeWrapper import DatetimeWrapper
 from config import Config
 from db_connection import DbConnection as Db
 
@@ -44,6 +48,7 @@ class AccountServer:
         self.app.add_url_rule("/set/<device>/burned", "set_burned", self.set_burned, methods=['POST'])
         self.app.add_url_rule("/set/<device>/logout", "set_logout", self.set_logout, methods=['POST'])
         self.app.add_url_rule("/stats", "stats", self.stats, methods=['GET'])
+        self.app.add_url_rule("/test", "test", self.test, methods=['GET'])
 
         werkzeug_logger = logging.getLogger("werkzeug")
         werkzeug_logger.setLevel(logging.WARNING)
@@ -86,13 +91,12 @@ class AccountServer:
         return data, code, self.resp_headers
 
     def invalid_request(self, data=None, code=400, logging=True):
-        if data is None:
-            data = {"status": "fail"}
-        if "status" not in data:
-            data = {"status": "fail", "data": data}
+        wrapper_data = {"status": "fail"}
+        if data:
+            wrapper_data["data"] = data
         if logging:
-            logger.warning(f"responding with {code}, data: {data}")
-        return data, code, self.resp_headers
+            logger.warning(f"responding with {code}, data: {wrapper_data}")
+        return wrapper_data, code, self.resp_headers
 
     def fallback(self, first=None, rest=None):
         logger.info("Fallback called")
@@ -100,7 +104,7 @@ class AccountServer:
             logger.info(f"POST request to fallback at {first}/{rest}")
         if request.method == 'GET':
             logger.info(f"GET request to fallback at {first}/{rest}")
-        return self.invalid_request()
+        return self.invalid_request(data="Unhandled request")
 
     def get_availability(self):
         device = request.args.get('device', default='', type=str)
@@ -126,23 +130,24 @@ class AccountServer:
 
     def get_account_info(self, device=None):
         if not device:
-            return self.invalid_request()
+            return self.invalid_request(data="Missing 'device' parameter")
 
-        logger.debug(f"get_assignment_info({device})")
+        logger.debug(f"get_account_info({device})")
 
-        select = f"SELECT username,level,last_returned,last_reason from accounts WHERE in_use_by = '{device}' LIMIT 1;"
+        select = f"SELECT username,level,last_returned,last_reason,last_burned from accounts WHERE in_use_by = '{device}' LIMIT 1;"
         with Db() as conn:
             conn.cur.execute(select)
             for elem in conn.cur:
                 last_returned_limit = self.config.get_cooldown_timestamp()
                 is_burnt = last_returned_limit < int(elem[2])
                 return self.resp_ok(data={"username": elem[0], "level": elem[1], "last_returned": elem[2], "last_reason": elem[3], "is_burnt": 1 if is_burnt else 0})
+            # TODO: add softban action/softban_lcation
         return self.resp_ok(code=204)
 
     def get_account(self, device=None):
         # TODO: track last known account location and consider new location?
         if not device:
-            return self.invalid_request()
+            return self.invalid_request(data="Missing 'device' parameter")
         leveling = request.args.get('leveling', default=0, type=int)
         level_query = " AND level < 30" if leveling else " AND level >= 30"
 
@@ -156,6 +161,7 @@ class AccountServer:
         reason = request.args.get('reason')  # None, level, maintenance, rotation, level, teleport, limit
 
         # sticky accounts (prefer account reusage unless burned)
+        # TODO: incorporate last usage from history table
         if not reason:
             last_returned_limit = self.config.get_cooldown_timestamp()
             last_returned_query = f" AND (last_returned IS NULL OR last_returned < {last_returned_limit})"
@@ -204,7 +210,7 @@ class AccountServer:
 
     def set_level(self, device=None, level: int = None):
         if not device or not level:
-            return self.invalid_request()
+            return self.invalid_request(data="Missing 'device' parameter")
 
         check_update = f"SELECT count(*) FROM accounts WHERE in_use_by = '{device}' AND level <> {level}"
         if not int(Db.get_single_results(check_update)[0]):
@@ -220,7 +226,7 @@ class AccountServer:
 
     def set_logout(self, device=None):
         if not device:
-            return self.invalid_request()
+            return self.invalid_request(data="Missing 'device' parameter")
 
         username = None
         claimed_sql = f"SELECT username, last_use FROM accounts WHERE in_use_by = '{device}'"
@@ -232,7 +238,7 @@ class AccountServer:
                 break
 
         if not username:
-            logger.info(f"Unable to logout {device} as it has no assignment.")
+            logger.debug(f"Unable to logout {device} as it has no assignment.")
             return self.resp_ok()
         logger.info(f"Request from {device} to logout {username} (acquired {(time.time() - last_used) / 60 / 60} h ago)")
 
@@ -248,16 +254,13 @@ class AccountServer:
         encounters = 0
         if 'encounters' in args:
             encounters = int(args['encounters'])
-        history = (
-            f"INSERT INTO accounts_history SET username = '{username}', acquired = '{int(last_used)}', burned = '{int(time.time())}', reason = 'logout', encounters = {encounters}")
-        with Db() as conn:
-            conn.cur.execute(history)
+        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), burned=None, reason='logout', encounters=encounters)
 
         return self.resp_ok(data={"username": username, "status": "logged out"})
 
     def set_burned(self, device=None):
         if not device:
-            return self.invalid_request()
+            return self.invalid_request(data="Missing 'device' parameter")
 
         username = None
         claimed_sql = f"SELECT username, last_use FROM accounts WHERE in_use_by = '{device}'"
@@ -274,13 +277,16 @@ class AccountServer:
         logger.info(f"Request from {device} to burn account {username} (acquired {(time.time() - last_used) / 60 / 60} h ago)")
 
         args = request.get_json()
-        print(args)
         last_reason = ''
         if 'reason' in args:
             last_reason = args['reason']
 
-        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}', last_updated = '{int(time.time())}',"
-                 f" last_reason = '{last_reason}' WHERE in_use_by = '{device}';")
+        last_burned_sql = ''
+        if last_reason == "maintenance":
+            last_burned_sql = f", last_burned = '{DatetimeWrapper.now()}'"
+
+        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}', last_updated = '{int(time.time())}'"
+                 f" {last_burned_sql}, last_reason = '{last_reason}' WHERE in_use_by = '{device}';")
 
         with Db() as conn:
             conn.cur.execute(reset)
@@ -288,12 +294,17 @@ class AccountServer:
         encounters = 0
         if 'encounters' in args:
             encounters = int(args['encounters'])
-        history = (
-            f"INSERT INTO accounts_history SET username = '{username}', acquired = '{int(last_used)}', burned = '{int(time.time())}', reason = '{last_reason}', encounters = {encounters}")
-        with Db() as conn:
-            conn.cur.execute(history)
+        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), burned=DatetimeWrapper.now(), reason=last_reason, encounters=encounters)
 
         return self.resp_ok(data={"username": username, "status": "burned"})
+
+    def _write_history(self, username: str, device: str, acquired: Optional[datetime.datetime], burned: Optional[datetime.datetime], reason, encounters):
+        acquired_sql = f", acquired = '{acquired}'" if acquired else ''
+        burned_sql = f", burned = '{burned}'" if burned else ''
+        history = (
+            f"INSERT INTO accounts_history SET username = '{username}', device = '{device}' {acquired_sql} {burned_sql}, reason = '{reason}', encounters = {encounters}")
+        with Db() as conn:
+            conn.cur.execute(history)
 
     def _stats_data(self):
         last_returned_limit = self.config.get_cooldown_timestamp()
@@ -352,6 +363,15 @@ class AccountServer:
             }
         }
         return result
+
+    def test(self):
+        sql = f"SELECT last_burned FROM accounts WHERE last_burned IS NOT NULL LIMIT 10"
+        data = []
+        with Db() as conn:
+            conn.cur.execute(sql)
+            for elem in conn.cur:
+                data.append(elem[0])
+        return data
 
     def stats(self):
         return self._stats_data(), 200, self.resp_headers
