@@ -111,11 +111,12 @@ class AccountServer:
         leveling = request.args.get('leveling', default=0, type=int)
         region = request.args.get('region', default='', type=str)
         logger.info(f"get_availability({device}): leveling={leveling}, region={region}")
-        last_returned_limit = self.config.get_cooldown_timestamp()
 
-        last_returned_query = f" AND (last_returned IS NULL OR last_returned < {last_returned_limit})"
+        last_returned_limit = self.config.get_cooldown_timestamp()
+        last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
+
         level_query = " AND level < 30" if leveling else " AND level >= 30"
-        is_reuse = f"SELECT 1 from accounts WHERE in_use_by = '{device}' {level_query} {last_returned_query} LIMIT 1;"
+        is_reuse = f"SELECT 1 from accounts WHERE in_use_by = '{device}' {level_query} AND {last_returned_query} LIMIT 1;"
         resp = Db.get_single_results(is_reuse)
         if resp[0]:
             # we can reuse the account
@@ -164,8 +165,8 @@ class AccountServer:
         # TODO: incorporate last usage from history table
         if not reason:
             last_returned_limit = self.config.get_cooldown_timestamp()
-            last_returned_query = f" AND (last_returned IS NULL OR last_returned < {last_returned_limit})"
-            select = f"SELECT username, password, level from accounts WHERE in_use_by = '{device}' {last_returned_query} {level_query} LIMIT 1;"
+            last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
+            select = f"SELECT username, password, level from accounts WHERE in_use_by = '{device}' AND {last_returned_query} {level_query} LIMIT 1;"
             with Db() as conn:
                 conn.cur.execute(select)
                 for elem in conn.cur:
@@ -185,8 +186,9 @@ class AccountServer:
             region_query = f" AND (region IS NULL OR region = '' OR region = '{region}')" if region != '' else ""
 
             last_returned_limit = self.config.get_cooldown_timestamp()
+            last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
             last_use_limit = self.config.get_short_cooldown_timestamp()
-            select = (f"SELECT username, password, level from accounts WHERE in_use_by IS NULL AND last_returned < {last_returned_limit} AND last_use < "
+            select = (f"SELECT username, password, level from accounts WHERE in_use_by IS NULL AND {last_returned_query} AND last_use < "
                       f"{last_use_limit} {level_query} {region_query} ORDER BY last_use ASC LIMIT 1;")
             logger.debug(select)
             with Db() as conn:
@@ -308,6 +310,8 @@ class AccountServer:
 
     def _stats_data(self):
         last_returned_limit = self.config.get_cooldown_timestamp()
+        last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
+
         last_use_limit = self.config.get_short_cooldown_timestamp()
 
         regions = ["EU", "US"]
@@ -319,8 +323,8 @@ class AccountServer:
             cd_sql = f"SELECT count(*) FROM accounts WHERE last_returned >= {last_returned_limit} AND {region_query}"
             in_use_sql = f"SELECT count(*) FROM accounts WHERE in_use_by IS NOT NULL AND {region_query}"  # consider added last_updated check
             unleveled_sql = f"SELECT count(*) FROM accounts WHERE level < 30 AND {region_query}"
-            available_leveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND last_use < {last_use_limit} AND in_use_by IS NULL AND {region_query} AND level >= 30"
-            available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND last_use < {last_use_limit} AND in_use_by IS NULL AND {region_query} AND level < 30"
+            available_leveled_sql = f"SELECT count(*) FROM accounts WHERE {last_returned_query} AND last_use < {last_use_limit} AND in_use_by IS NULL AND {region_query} AND level >= 30"
+            available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE {last_returned_limit} AND last_use < {last_use_limit} AND in_use_by IS NULL AND {region_query} AND level < 30"
             total_sql = f"SELECT count(*) FROM accounts WHERE {region_query}"
 
             cooldown, in_use, unleveled, total, a_leveled, a_unleveled = Db.get_single_results(cd_sql, in_use_sql, unleveled_sql, total_sql, available_leveled_sql,
@@ -341,8 +345,8 @@ class AccountServer:
 
         cd_sql = f"SELECT count(*) FROM accounts WHERE last_returned >= {last_returned_limit} AND region IS NULL"
         in_use_sql = "SELECT count(*) FROM accounts WHERE in_use_by IS NOT NULL AND region IS NULL"
-        available_leveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND last_use < {last_use_limit} AND in_use_by IS NULL AND region IS NULL AND level >= 30"
-        available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE last_returned < {last_returned_limit} AND last_use < {last_use_limit} AND in_use_by IS NULL AND region IS NULL AND level < 30"
+        available_leveled_sql = f"SELECT count(*) FROM accounts WHERE {last_returned_query} AND last_use < {last_use_limit} AND in_use_by IS NULL AND region IS NULL AND level >= 30"
+        available_unleveled_sql = f"SELECT count(*) FROM accounts WHERE {last_returned_query} AND last_use < {last_use_limit} AND in_use_by IS NULL AND region IS NULL AND level < 30"
         unleveled_sql = "SELECT count(*) FROM accounts WHERE level < 30 AND region IS NULL"
         total_sql = "SELECT count(*) FROM accounts WHERE region IS NULL"
 
