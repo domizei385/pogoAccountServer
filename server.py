@@ -18,8 +18,31 @@ from logs import setup_logger
 
 setup_logger()
 
+
 # TODO: add job to kill outdated assignments
 # SELECT username, FROM_UNIXTIME(last_updated), region  FROM `accounts` where FROM_UNIXTIME(last_updated) < '2023-06-07' and in_use_by IS NOT NULl
+
+# Speed can be 60 km/h up to distances of 3km
+QUEST_WALK_SPEED_CALCULATED = 16.67
+
+
+def _purpose_to_level_query(device_logger, purpose):
+    # IV_QUEST = "quest_iv"
+    # LEVEL = "level"
+    # QUEST = "quest"
+    # IV = "iv"
+    # MON_RAID = "mon_raid"
+
+    if purpose == "iv" or purpose == "quest" or purpose == "quest_iv":
+        return " (level >= 30)"
+    elif purpose == "mon_raid":
+        return " (level >= 8)"
+    elif purpose == "level":
+        return " (level < 30)"
+    else:
+        device_logger.warning(f"Unhandled purpose {purpose}")
+        return " (1=1)"
+
 
 class AccountServer:
 
@@ -114,26 +137,29 @@ class AccountServer:
 
     def get_availability(self):
         device = request.args.get('device', default='', type=str)
-        leveling = request.args.get('leveling', default=0, type=int)
+        purpose = request.args.get('purpose', default='', type=str)
         region = request.args.get('region', default='', type=str)
 
         device_logger = logger.bind(name=device)
-        device_logger.debug(f"get_availability({device}): leveling={leveling}, region={region}")
+        device_logger.debug(f"get_availability({device}): purpose={purpose}, region={region}")
 
         last_returned_limit = self.config.get_cooldown_timestamp()
         last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
 
-        level_query = " AND level < 30" if leveling else " AND level >= 30"
-        is_reuse = f"SELECT 1 from accounts WHERE in_use_by = '{device}' {level_query} AND {last_returned_query} LIMIT 1;"
-        resp = Db.get_single_results(is_reuse)
-        if resp[0]:
-            # we can reuse the account
-            return self.resp_ok(data={"available": int(resp[0]), "type": "reuse"})
-        all_stats = self._stats_data()
+        purpose_query = _purpose_to_level_query(device_logger, purpose)
+        select_reuse = f"SELECT 1 from accounts WHERE in_use_by = '{device}' AND {purpose_query} AND {last_returned_query} LIMIT 1;"
+        try:
+            resp = Db.get_single_results(select_reuse)
+            if resp[0]:
+                # we can reuse the account
+                return self.resp_ok(data={"available": int(resp[0]), "type": "reuse"})
+        except:
+            logger.info(f"Error during query: {select_reuse}")
+            return self.invalid_request(code=500)
 
-        region_stats = all_stats[region] if region else all_stats['shared']
-        node_available = region_stats['available']
-        available = int(node_available['unleveled']) if leveling else int(node_available['leveled'])
+        account = self._get_next_account(device=device, region=region, purpose=purpose, location=None, do_log=False, reserve=False)
+        # TODO: fix and return more accurate count
+        available = 1 if account else 0
 
         return self.resp_ok(data={"available": available, "type": "pool"})
 
@@ -149,17 +175,20 @@ class AccountServer:
                   f" GROUP BY a.username"
                   f" LIMIT 1;")
 
-        with Db() as conn:
-            conn.cur.execute(select)
-            for elem in conn.cur:
-                last_returned_limit = self.config.get_cooldown_timestamp()
-                is_burnt = last_returned_limit < int(elem[2])
-                encounters = int(elem[5]) if elem[5] else 0
-                remaining_encounters = max(0, self.config.encounter_limit - encounters)
-                softban_info = (elem[6], elem[7]) if elem[6] else None
-                data = self._build_account_response(username=elem[0], password="", level=int(elem[2]), last_returned=elem[3], last_reason=elem[4], remaining_encounters=remaining_encounters,
-                                                    is_burnt=1 if is_burnt else 0, softban_info=softban_info)
-                return self.resp_ok(data=data)
+        try:
+            with Db() as conn:
+                conn.cur.execute(select)
+                for elem in conn.cur:
+                    last_returned_limit = self.config.get_cooldown_timestamp()
+                    is_burnt = last_returned_limit < int(elem[2])
+                    encounters = int(elem[5]) if elem[5] else 0
+                    softban_info = (elem[6], elem[7]) if elem[6] else None
+                    account = (elem[0], "", int(elem[2]), encounters, softban_info)
+                    data = self._build_account_response(account=account, last_returned=elem[3], last_reason=elem[4], is_burnt=1 if is_burnt else 0)
+                    return self.resp_ok(data=data)
+        except:
+            logger.info(f"Error during query: {select}")
+            return self.invalid_request(code=500)
         return self.resp_ok(code=204)
 
     def get_account(self, device=None):
@@ -169,25 +198,33 @@ class AccountServer:
         device_logger = logger.bind(name=device)
 
         args = request.get_json()
-        leveling = int(args['leveling']) if 'leveling' in args else 0
+        purpose = args['purpose'] if 'purpose' in args else None
+        if not purpose:
+            return self.invalid_request(data="Missing 'purpose' parameter")
         do_log = int(args['logging']) if 'logging' in args else 0
-        level_query = " level < 30" if leveling else " level >= 30"
         region = args['region'] if 'region' in args else None
         reason = args['reason'] if 'reason' in args else None  # None, level, maintenance, rotation, level, teleport, limit
 
         location = args['location'] if 'location' in args else None
+        purpose = args['purpose'] if 'purpose' in args else None
+
+        # TODO: set time constraint so it works for C-DAY
+        if purpose == "iv":
+            device_logger.debug(f"Purpose = IV is disabled")
+            return self.resp_ok(code=204, data={"error": "No accounts available"})
+
         if location:
             location = json.dumps(location)
         device_logger.debug(
-            f"get_account: leveling={leveling}, region={region}, reason={reason}, "
-            f"location={location}")
+            f"get_account: purpose={purpose}, region={region}, reason={reason}, "
+            f"location={location}, purpose={purpose}")
 
-        username, pw, level, last_returned, last_reason = None, None, None, None, None
-        encounters = 0
+        account = None
 
         # sticky accounts (prefer account reusage unless burned)
-        aggregate_encounters_from = DatetimeWrapper.now() - datetime.timedelta(hours=self.config.cooldown_hours)
         if not reason:
+            aggregate_encounters_from = DatetimeWrapper.now() - datetime.timedelta(hours=self.config.cooldown_hours)
+            purpose_query = _purpose_to_level_query(device_logger, purpose)
             last_returned_limit = self.config.get_cooldown_timestamp()
             last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
             select = (f"SELECT a.username, a.password, a.level, ah.total, a.softban_time, a.softban_location "
@@ -199,80 +236,47 @@ class AccountServer:
                       f"       ) ah ON a.username = ah.username"
                       f" WHERE a.in_use_by = '{device}'"
                       f"   AND {last_returned_query}"
-                      f"   AND {level_query}"
-                      f" GROUP BY a.username LIMIT 1;")
+                      f"   AND {purpose_query}"
+                      f" LIMIT 1 FOR UPDATE;")
             with Db() as conn:
                 if do_log:
                     device_logger.info(select)
+                cursor = conn.cursor()
                 try:
-                    conn.cur.execute(select)
-                    elem = conn.cur.fetchone()
+                    cursor.execute(select)
+                    elem = cursor.fetchone()
                     if elem:
                         username = elem[0]
                         pw = elem[1]
-                        level = elem[2]
+                        level = int(elem[2])
                         encounters = int(elem[3]) if elem[3] else 0
                         softban_info = (elem[4], elem[5]) if elem[4] else None
+
+                        mark_used = (f"UPDATE accounts SET last_use = '{int(time.time())}', last_updated = '{int(time.time())}', last_reason = NULL,"
+                                     f"purpose = '{purpose}' WHERE username = '{username}';")
+                        cursor.execute(mark_used)
+
+                        account = (username, pw, level, encounters, softban_info)
                 except Exception as ex:
                     device_logger.error("Exception during query {}. Exception: {}", select, ex)
+                finally:
+                    cursor.close()
 
-        if not username or not pw:
+        if not account:
             # drop any previous usage of requesting device
             reset = (f"UPDATE accounts SET in_use_by = NULL, last_updated = '{int(time.time())}' WHERE in_use_by = '{device}';")
             with Db() as conn:
                 conn.cur.execute(reset)
 
-            # new account
-            region_query = f" (region IS NULL OR region = '' OR region = '{region}')" if region else " 1=1 "
+            account = self._get_next_account(device=device, region=region, purpose=purpose, location=location, do_log=do_log)
 
-            last_returned_limit = self.config.get_cooldown_timestamp()
-            last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
-            last_use_limit = self.config.get_short_cooldown_timestamp()
-            # TODO: incorporate last usage from history table
-            order_by_query = "ORDER BY a.level DESC" if leveling == 1 else "ORDER BY a.last_use ASC"
-            select = (f"SELECT a.username, a.password, a.level, ah.total, a.softban_time, a.softban_location "
-                      f"  FROM accounts a LEFT JOIN "
-                      f"       (SELECT ax.username, SUM(ax.encounters) total FROM accounts_history ax "
-                      f"         WHERE ax.returned > '{aggregate_encounters_from}' "
-                      f"      GROUP BY ax.username"
-                      f"        HAVING SUM(ax.encounters) < {self.config.encounter_limit * 0.8}"  # at least 20% of encounters left to prevent frequent relogins 
-                      f"       ) ah ON a.username = ah.username"
-                      f" WHERE in_use_by IS NULL "
-                      f"   AND {last_returned_query}"
-                      f"   AND (last_use < {last_use_limit} OR level < 30)"
-                      f"   AND {level_query}"
-                      f"   AND {region_query}"
-                      f" GROUP BY a.username"
-                      f" {order_by_query} LIMIT 1;")
-            if do_log:
-                device_logger.info(select)
-            else:
-                device_logger.debug(select)
-            with Db() as conn:
-                try:
-                    conn.cur.execute(select)
-                    elem = conn.cur.fetchone()
-                    if elem:
-                        username = elem[0]
-                        pw = elem[1]
-                        level = elem[2]
-                        encounters = int(elem[3]) if elem[3] else 0
-                        softban_info = (elem[4], elem[5]) if elem[4] else None
-                except Exception as ex:
-                    device_logger.error("Exception during query {}. Exception: {}", select, ex)
-
-            if not username or not pw:
+            if not account:
                 device_logger.debug(f"Found no suitable account")
                 return self.resp_ok(code=204, data={"error": "No accounts available"})
 
-        mark_used = (f"UPDATE accounts SET in_use_by = '{device}', last_use = '{int(time.time())}', last_updated = '{int(time.time())}', last_reason = NULL WHERE "
-                     f"username = '{username}';")
-        with Db() as conn:
-            conn.cur.execute(mark_used)
         # device_logger.info(f"Request from {device}(leveling={request.args.get('leveling')}, reason={reason}) return {username=}, {pw=}")
-        remaining_encounters = max(0, self.config.encounter_limit - encounters)
-        data = self._build_account_response(username=username, password=pw, level=level, last_returned=None, last_reason=None, remaining_encounters=remaining_encounters,
-                                            is_burnt=0, softban_info=softban_info)
+
+        data = self._build_account_response(account=account, last_returned=None, last_reason=None, is_burnt=0)
         device_logger.debug("get_account: " + str(data))
         return self.resp_ok(data=data)
 
@@ -300,9 +304,7 @@ class AccountServer:
         args = request.get_json()
 
         set_location = (f"UPDATE accounts SET softban_time = '{args['time']}',"
-                 f" softban_location = '{args['location']}' WHERE in_use_by = '{device}';")
-        # time_of_action = datetime.datetime.fromisoformat(args["time"])
-        # location = datetime.datetime.fromisoformat(args["time"])
+                        f" softban_location = '{args['location']}' WHERE in_use_by = '{device}';")
         with Db() as conn:
             conn.cur.execute(set_location)
 
@@ -315,12 +317,14 @@ class AccountServer:
         device_logger = logger.bind(name=device)
 
         username = None
-        claimed_sql = f"SELECT username, last_use FROM accounts WHERE in_use_by = '{device}'"
+        purpose = None
+        claimed_sql = f"SELECT username, last_use, purpose FROM accounts WHERE in_use_by = '{device}'"
         with Db() as conn:
             conn.cur.execute(claimed_sql)
             for elem in conn.cur:
                 username = elem[0]
                 last_used = int(elem[1])
+                purpose = elem[2]
                 break
 
         if not username:
@@ -340,7 +344,7 @@ class AccountServer:
         with Db() as conn:
             conn.cur.execute(reset)
 
-        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), reason='logout', encounters=encounters)
+        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), reason='logout', encounters=encounters, purpose=purpose)
 
         return self.resp_ok(data={"username": username, "status": "logged out"})
 
@@ -350,12 +354,14 @@ class AccountServer:
         device_logger = logger.bind(name=device)
 
         username = None
-        claimed_sql = f"SELECT username, last_use FROM accounts WHERE in_use_by = '{device}'"
+        purpose = None
+        claimed_sql = f"SELECT username, last_use, purpose FROM accounts WHERE in_use_by = '{device}'"
         with Db() as conn:
             conn.cur.execute(claimed_sql)
             for elem in conn.cur:
                 username = elem[0]
                 last_used = int(elem[1])
+                purpose = elem[2]
                 break
 
         if not username:
@@ -373,7 +379,7 @@ class AccountServer:
             last_burned_sql = f", last_burned = '{DatetimeWrapper.now()}'"
 
         reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}', last_updated = '{int(time.time())}'"
-                 f" {last_burned_sql}, last_reason = '{last_reason}' WHERE in_use_by = '{device}';")
+                 f" {last_burned_sql}, last_reason = '{last_reason}', purpose = NULL WHERE in_use_by = '{device}';")
 
         with Db() as conn:
             conn.cur.execute(reset)
@@ -381,18 +387,20 @@ class AccountServer:
         encounters = 0
         if 'encounters' in args:
             encounters = int(args['encounters'])
-        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), reason=last_reason, encounters=encounters)
+        self._write_history(username, device, acquired=DatetimeWrapper.fromtimestamp(last_used), reason=last_reason, encounters=encounters, purpose=purpose)
 
         return self.resp_ok(data={"username": username, "status": "burned"})
 
     def _write_history(self, username: str, device: str, acquired: Optional[datetime.datetime], reason: str, encounters: int,
-        returned: Optional[datetime.datetime] = None):
+        returned: Optional[datetime.datetime] = None, purpose: str = None):
         acquired_sql = f", acquired = '{acquired}'" if acquired else ''
         if not returned:
             returned = DatetimeWrapper.now()
         returned_sql = f", returned = '{returned}'" if returned else ''
+        purpose_sql = f", purpose = '{purpose}'" if purpose else ''
         history = (
-            f"INSERT INTO accounts_history SET username = '{username}', device = '{device}' {acquired_sql} {returned_sql}, reason = '{reason}', encounters = {encounters}")
+            f"INSERT INTO accounts_history SET username = '{username}', device = '{device}' {acquired_sql} {returned_sql}, reason = '{reason}', encounters = {encounters}"
+            f" {purpose_sql}")
         with Db() as conn:
             conn.cur.execute(history)
 
@@ -457,34 +465,150 @@ class AccountServer:
         return result
 
     def test(self):
-        sql = f"SELECT last_burned FROM accounts WHERE last_burned IS NOT NULL LIMIT 10"
-        data = []
-        with Db() as conn:
-            conn.cur.execute(sql)
-            for elem in conn.cur:
-                data.append(elem[0])
-        return data
+        device = request.args.get('device', default='test', type=str)
+        region = request.args.get('region', default='EU', type=str)
+        purpose = request.args.get('purpose', default='iv', type=str)
+        lat = request.args.get('lat', default=0.0, type=float)
+        lng = request.args.get('lng', default=0.0, type=float)
+
+        account = self._get_next_account(device=device, region=region, purpose=purpose, location=Location(lat, lng), do_log=True, reserve=False)
+        logger.info(account)
+        if account and account[4]:
+            softban_info = account[4]
+            last_action_location = Location.from_json(softban_info[1])
+            # logger.info(f"Location: {last_action_location}")
+            distance_last_action = last_action_location.get_distance_from_in_meters(lat, lng)
+            # logger.info(f"distance: {distance_last_action}")
+            softban_time = datetime.datetime.fromisoformat(softban_info[0])
+            cooldown_seconds = Location.calculate_cooldown(distance_last_action, QUEST_WALK_SPEED_CALCULATED)
+            # logger.info(f"Cooldown: {cooldown_seconds}")
+            usable = DatetimeWrapper.now() > softban_time + datetime.timedelta(seconds=cooldown_seconds)
+            # logger.info(f"Usable: {usable}")
+            return self.resp_ok(data=account)
+        return self.resp_ok(code=204)
+
+    # TODO: add
+    #     elif purpose in [AccountPurpose.LEVEL, AccountPurpose.QUEST, AccountPurpose.IV_QUEST]:
+    #         # Depending on last softban action and distance to the location thereof
+    #
+    #         if not auth.last_softban_action_location:
+    #             return True
+    #         elif location_to_scan is None:
+    #             return False
+    #         last_action_location: Location = Location(auth.last_softban_action_location[0],
+    #                                                   auth.last_softban_action_location[1])
+    #         distance_last_action = get_distance_of_two_points_in_meters(last_action_location.lat,
+    #                                                                     last_action_location.lng,
+    #                                                                     location_to_scan.lat,
+    #                                                                     location_to_scan.lng)
+    #         cooldown_seconds = calculate_cooldown(distance_last_action, QUEST_WALK_SPEED_CALCULATED)
+    #         usable: bool = DatetimeWrapper.now() > auth.last_softban_action \
+    #                        + datetime.timedelta(seconds=cooldown_seconds)
+    #         logger.debug2("Calculated cooldown: {}, thus usable: {}", cooldown_seconds, usable)
+    #         return usable
 
     def stats(self):
         return self._stats_data(), 200, self.resp_headers
 
-    def _build_account_response(self, username: str, password: str, level: int, last_returned: Optional[int], last_reason: Optional[str], remaining_encounters: int = None,
-        is_burnt: int = 0, softban_info:tuple[str, str]=None):
+    def _build_account_response(self, account: tuple[str, str, int, int, tuple[str, str]], last_returned: Optional[int], last_reason: Optional[str], is_burnt: int = 0):
+        remaining_encounters = max(0, self.config.encounter_limit - account[3])
         if not remaining_encounters:
             remaining_encounters = self.config.encounter_limit
-        response = {"username": username, "password": password, "level": level, "remaining_encounters": remaining_encounters, "is_burnt": is_burnt}
+        response = {"username": account[0], "password": account[1], "level": account[2], "remaining_encounters": remaining_encounters, "is_burnt": is_burnt}
         if last_returned:
             response["last_returned"] = last_returned
         if last_reason:
             response["last_reason"] = last_reason
-        if softban_info:
+        if account[4]:
             response["softban_info"] = {
-                "time": softban_info[0],
-                "location": softban_info[1]
+                "time": account[4][0],
+                "location": account[4][1]
             }
         logger.debug(response)
         return response
 
+    def _get_next_account(self, device: str, region: str, purpose: str, location: Optional[Location], do_log: int, reserve: bool = True) -> Optional[
+        tuple[str, str, int, int, tuple[str, str]]]:
+        if not device:
+            return None
+        device_logger = logger.bind(name=device)
+
+        region_query = f" (region IS NULL OR region = '' OR region = '{region}')" if region else " 1=1 "
+
+        last_returned_limit = self.config.get_cooldown_timestamp()
+        last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
+        last_use_limit = self.config.get_short_cooldown_timestamp()
+        order_by_query = "ORDER BY a.level DESC" if purpose == 'iv' else "ORDER BY a.last_use ASC"
+
+        purpose_query = _purpose_to_level_query(device_logger, purpose)
+        encounters_from = DatetimeWrapper.now() - datetime.timedelta(hours=self.config.cooldown_hours)
+
+        account = None
+        ignore_accounts = list()
+        while not account and len(ignore_accounts) < 20:
+            # TODO: incorporate last usage from history table
+            username_exclusion = f"AND a.username NOT IN ({','.join(ignore_accounts)})" if len(ignore_accounts) > 0 else ""
+            select = (f"SELECT a.username, a.password, a.level, ah.total, a.softban_time, a.softban_location "
+                      f"  FROM accounts a LEFT JOIN "
+                      f"       (SELECT ax.username, SUM(ax.encounters) total FROM accounts_history ax "
+                      f"         WHERE ax.returned > '{encounters_from}' "
+                      f"      GROUP BY ax.username"
+                      f"        HAVING SUM(ax.encounters) < {self.config.encounter_limit * 0.8}"  # at least 20% of encounters left to prevent frequent relogins 
+                      f"       ) ah ON a.username = ah.username"
+                      f" WHERE in_use_by IS NULL "
+                      f"   AND {last_returned_query}"
+                      f"   AND (last_use < {last_use_limit} OR level < 30)"
+                      f"   AND {purpose_query}"
+                      f"   AND {region_query}"
+                      f"   {username_exclusion}"
+                      f" GROUP BY a.username"
+                      f" {order_by_query} LIMIT 1"
+                      f" {'FOR UPDATE' if reserve else ''};")
+            if do_log:
+                device_logger.info(select)
+            else:
+                device_logger.debug(select)
+            with Db() as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(select)
+                    elem = cursor.fetchone()
+                    if elem:
+                        username = elem[0]
+                        pw = elem[1]
+                        level = int(elem[2])
+                        encounters = int(elem[3]) if elem[3] else 0
+                        softban_info = (elem[4], elem[5]) if elem[4] else None
+
+                        if softban_info and location and not self._account_suitable_for_location(softban_info, location):
+                            ignore_accounts.append(f"'{username}'")
+                            logger.info(f"Account {username} not suitable. Skipping")
+                            continue
+
+                        if reserve:
+                            mark_used = (f"UPDATE accounts SET in_use_by = '{device}', last_use = '{int(time.time())}', last_updated = '{int(time.time())}', last_reason = NULL,"
+                                         f"purpose = '{purpose}' WHERE username = '{username}';")
+                            cursor.execute(mark_used)
+
+                        account = (username, pw, level, encounters, softban_info)
+                except Exception as ex:
+                    device_logger.error("Exception during query {}. Exception: {}", select, ex)
+                finally:
+                    cursor.close()
+
+            return account
+
+    def _account_suitable_for_location(self, softban_info: tuple[str, str], location: str):
+        location = Location.from_json(location)
+        last_action_location = Location.from_json(softban_info[1])
+        logger.info(f"Last Location: {last_action_location}, New Location: {location}")
+        distance_last_action = last_action_location.get_distance_from_in_meters(location.lat, location.lng)
+        # logger.info(f"distance: {distance_last_action}")
+        softban_time = datetime.datetime.fromisoformat(softban_info[0])
+        cooldown_seconds = Location.calculate_cooldown(distance_last_action, QUEST_WALK_SPEED_CALCULATED)
+        usable = DatetimeWrapper.now() > softban_time + datetime.timedelta(seconds=cooldown_seconds)
+        logger.info(f"Cooldown: {cooldown_seconds}, Usable: {usable}")
+        return usable
 
 if __name__ == "__main__":
     serv = AccountServer()
