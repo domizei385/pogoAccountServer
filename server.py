@@ -6,6 +6,7 @@ import time
 from typing import Optional
 
 import humanize as humanize
+import pytz
 from flask import Flask, request
 from flask_basicauth import BasicAuth
 from loguru import logger
@@ -209,9 +210,28 @@ class AccountServer:
         purpose = args['purpose'] if 'purpose' in args else None
 
         # TODO: set time constraint so it works for C-DAY
-        if purpose == "iv":
-            device_logger.debug(f"Purpose = IV is disabled")
-            return self.resp_ok(code=204, data={"error": "No accounts available"})
+
+        # if region == "US":
+        #     end_leveling = datetime.datetime.fromisoformat('2023-06-10 13:25:00.000000-04:00')
+        #     start_iv = datetime.datetime.fromisoformat('2023-06-10 13:55:00.000000-04:00')
+        #     end_iv = datetime.datetime.fromisoformat('2023-06-10 17:00:00.000000-04:00')
+        #     tz = pytz.timezone("America/New_York")
+        #     now = DatetimeWrapper.now(tz)
+        # else:
+        #     end_leveling = datetime.datetime.fromisoformat('2023-06-10 13:25:00.000000+02:00')
+        #     start_iv = datetime.datetime.fromisoformat('2023-06-10 13:55:00.000000+02:00')
+        #     end_iv = datetime.datetime.fromisoformat('2023-06-10 17:00:00.000000+02:00')
+        #     now = DatetimeWrapper.now()
+
+        # if purpose == "level":
+        #     if now > end_leveling and now < end_iv:
+        #         device_logger.info(f"No leveling before cday {region}")
+        #         return self.resp_ok(code=204, data={"error": "No accounts available"})
+        # elif purpose == "iv" or purpose == "quest_iv":
+        #     if now < start_iv or now > end_iv:
+        #         device_logger.info(f"No iv. {region}")
+        #         #device_logger.debug(f"Purpose = IV is disabled")
+        #         return self.resp_ok(code=204, data={"error": "No accounts available"})
 
         if location:
             location = json.dumps(location)
@@ -465,26 +485,26 @@ class AccountServer:
         return result
 
     def test(self):
-        device = request.args.get('device', default='test', type=str)
-        region = request.args.get('region', default='EU', type=str)
-        purpose = request.args.get('purpose', default='iv', type=str)
-        lat = request.args.get('lat', default=0.0, type=float)
-        lng = request.args.get('lng', default=0.0, type=float)
-
-        account = self._get_next_account(device=device, region=region, purpose=purpose, location=Location(lat, lng), do_log=True, reserve=False)
-        logger.info(account)
-        if account and account[4]:
-            softban_info = account[4]
-            last_action_location = Location.from_json(softban_info[1])
-            # logger.info(f"Location: {last_action_location}")
-            distance_last_action = last_action_location.get_distance_from_in_meters(lat, lng)
-            # logger.info(f"distance: {distance_last_action}")
-            softban_time = datetime.datetime.fromisoformat(softban_info[0])
-            cooldown_seconds = Location.calculate_cooldown(distance_last_action, QUEST_WALK_SPEED_CALCULATED)
-            # logger.info(f"Cooldown: {cooldown_seconds}")
-            usable = DatetimeWrapper.now() > softban_time + datetime.timedelta(seconds=cooldown_seconds)
-            # logger.info(f"Usable: {usable}")
-            return self.resp_ok(data=account)
+        # device = request.args.get('device', default='test', type=str)
+        # region = request.args.get('region', default='EU', type=str)
+        # purpose = request.args.get('purpose', default='iv', type=str)
+        # lat = request.args.get('lat', default=0.0, type=float)
+        # lng = request.args.get('lng', default=0.0, type=float)
+        #
+        # account = self._get_next_account(device=device, region=region, purpose=purpose, location=Location(lat, lng), do_log=True, reserve=False)
+        # logger.info(account)
+        # if account and account[4]:
+        #     softban_info = account[4]
+        #     last_action_location = Location.from_json(softban_info[1])
+        #     # logger.info(f"Location: {last_action_location}")
+        #     distance_last_action = last_action_location.get_distance_from_in_meters(lat, lng)
+        #     # logger.info(f"distance: {distance_last_action}")
+        #     softban_time = datetime.datetime.fromisoformat(softban_info[0])
+        #     cooldown_seconds = Location.calculate_cooldown(distance_last_action, QUEST_WALK_SPEED_CALCULATED)
+        #     # logger.info(f"Cooldown: {cooldown_seconds}")
+        #     usable = DatetimeWrapper.now() > softban_time + datetime.timedelta(seconds=cooldown_seconds)
+        #     # logger.info(f"Usable: {usable}")
+        #     return self.resp_ok(data=account)
         return self.resp_ok(code=204)
 
     # TODO: add
@@ -580,12 +600,14 @@ class AccountServer:
                         encounters = int(elem[3]) if elem[3] else 0
                         softban_info = (elem[4], elem[5]) if elem[4] else None
 
-                        if softban_info and location and not self._account_suitable_for_location(softban_info, location):
+                        if softban_info and location and not self._account_suitable_for_location(device, softban_info, location):
                             ignore_accounts.append(f"'{username}'")
-                            logger.info(f"Account {username} not suitable. Skipping")
+                            device_logger.info(f"Account {username} not suitable. Skipping")
                             continue
 
                         if reserve:
+                            if len(ignore_accounts) > 0:
+                                device_logger.info(f"Use alterantive account {username}")
                             mark_used = (f"UPDATE accounts SET in_use_by = '{device}', last_use = '{int(time.time())}', last_updated = '{int(time.time())}', last_reason = NULL,"
                                          f"purpose = '{purpose}' WHERE username = '{username}';")
                             cursor.execute(mark_used)
@@ -598,16 +620,16 @@ class AccountServer:
 
             return account
 
-    def _account_suitable_for_location(self, softban_info: tuple[str, str], location: str):
+    def _account_suitable_for_location(self, device: str, softban_info: tuple[str, str], location: str):
+        device_logger = logger.bind(name=device)
+
         location = Location.from_json(location)
         last_action_location = Location.from_json(softban_info[1])
-        logger.info(f"Last Location: {last_action_location}, New Location: {location}")
         distance_last_action = last_action_location.get_distance_from_in_meters(location.lat, location.lng)
-        # logger.info(f"distance: {distance_last_action}")
         softban_time = datetime.datetime.fromisoformat(softban_info[0])
         cooldown_seconds = Location.calculate_cooldown(distance_last_action, QUEST_WALK_SPEED_CALCULATED)
         usable = DatetimeWrapper.now() > softban_time + datetime.timedelta(seconds=cooldown_seconds)
-        logger.info(f"Cooldown: {cooldown_seconds}, Usable: {usable}")
+        device_logger.info(f"Last Location: {last_action_location}, New Location: {location}, Cooldown: {cooldown_seconds}, Usable: {usable}")
         return usable
 
 if __name__ == "__main__":
