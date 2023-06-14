@@ -4,9 +4,9 @@ import logging
 import os
 import time
 from typing import Optional
+from typing import Union
 
 import humanize as humanize
-import pytz
 from flask import Flask, request
 from flask_basicauth import BasicAuth
 from loguru import logger
@@ -350,12 +350,14 @@ class AccountServer:
         device_logger = logger.bind(name=device)
 
         username = None
-        claimed_sql = f"SELECT username, last_use FROM accounts WHERE in_use_by = '{device}'"
+        prev_level = 1
+        claimed_sql = f"SELECT username, last_use, level FROM accounts WHERE in_use_by = '{device}'"
         with Db() as conn:
             conn.cur.execute(claimed_sql)
             for elem in conn.cur:
                 username = elem[0]
                 last_used = int(elem[1])
+                prev_level = int(elem[2])
                 break
 
         if not username:
@@ -364,16 +366,20 @@ class AccountServer:
 
         args = request.get_json()
 
-        encounters = 0
-        if 'encounters' in args:
-            encounters = int(args['encounters'])
-        device_logger.info(f"Logout of {username} (usage {humanize.precisedelta(int(time.time()) - last_used)}, encounters = {encounters})")
+        encounters = int(args['encounters']) if 'encounters' in args else 0
+        level = int(args['level']) if 'level' in args else None
+        level_sql = f" , level = {level}" if level and level > prev_level else ""
 
-        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}', last_updated = '{int(time.time())}',"
-                 f" last_reason = NULL WHERE in_use_by = '{device}';")
+        device_logger.info(f"Logout of {username} (usage {humanize.precisedelta(int(time.time()) - last_used)}, encounters = {encounters}, level = {level})")
 
-        with Db() as conn:
-            conn.cur.execute(reset)
+        reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}', last_updated = '{int(time.time())}', "
+                 f"last_reason = NULL {level_sql} WHERE in_use_by = '{device}';")
+
+        try:
+            with Db() as conn:
+                conn.cur.execute(reset)
+        except Exception as ex:
+            logger.warning(f"Exception in {reset}: {ex}")
 
         self._write_history(username, device, reason='logout', encounters=encounters, returned=DatetimeWrapper.now())
 
@@ -385,12 +391,14 @@ class AccountServer:
         device_logger = logger.bind(name=device)
 
         username = None
-        claimed_sql = f"SELECT username, last_use FROM accounts WHERE in_use_by = '{device}'"
+        prev_level = 1
+        claimed_sql = f"SELECT username, last_use, level FROM accounts WHERE in_use_by = '{device}'"
         with Db() as conn:
             conn.cur.execute(claimed_sql)
             for elem in conn.cur:
                 username = elem[0]
                 last_used = int(elem[1])
+                prev_level = int(elem[2])
                 break
 
         if not username:
@@ -404,11 +412,13 @@ class AccountServer:
         if last_reason == "maintenance":
             last_burned_sql = f", last_burned = '{DatetimeWrapper.now()}'"
         last_reason_sql = f" last_reason = '{last_reason}'" if last_reason else " last_reason = NULL"
+        level = int(args["level"]) if 'level' in args else None
+        level_sql = f" level = '{level}'" if level and (level > prev_level) else " level = level"
 
         device_logger.info(f"Request to burn account {username} (reason: {last_reason}), acquired {humanize.precisedelta(int(time.time()) - last_used)} ago)")
 
         reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}', last_updated = '{int(time.time())}'"
-                 f" {last_burned_sql}, {last_reason_sql}, purpose = NULL WHERE in_use_by = '{device}';")
+                 f" {last_burned_sql}, {last_reason_sql}, {level_sql}, purpose = NULL WHERE in_use_by = '{device}';")
 
         with Db() as conn:
             conn.cur.execute(reset)
@@ -513,7 +523,7 @@ class AccountServer:
         lat = request.args.get('lat', default=0.0, type=float)
         lng = request.args.get('lng', default=0.0, type=float)
 
-        account = self._get_next_account(device=device, region=region, purpose=purpose, scan_location=Location(lat, lng), do_log=True, reserve=False)
+        account = self._get_next_account(device=device, region=region, purpose=purpose, scan_location=Location(lat, lng).to_json(), do_log=True, reserve=False)
         logger.info(account)
         if account and account[4]:
             softban_info = account[4]
@@ -569,7 +579,7 @@ class AccountServer:
         logger.debug(response)
         return response
 
-    def _get_next_account(self, device: str, region: str, purpose: str, scan_location: Optional[Location], do_log: int, reserve: bool = True) -> Optional[
+    def _get_next_account(self, device: str, region: str, purpose: str, scan_location: Optional[Union[bytes, str]], do_log: int, reserve: bool = True) -> Optional[
         tuple[str, str, int, int, tuple[str, str]]]:
         if not device:
             return None
@@ -580,7 +590,7 @@ class AccountServer:
         last_returned_limit = self.config.get_cooldown_timestamp()
         last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
         last_use_limit = self.config.get_short_cooldown_timestamp()
-        order_by_query = "ORDER BY a.level DESC" if purpose == 'iv' else "ORDER BY a.last_use ASC"
+        order_by_query = "ORDER BY a.level DESC" if purpose == 'level' else "ORDER BY a.last_use ASC"
 
         purpose_query = _purpose_to_level_query(device_logger, purpose)
         encounters_from = DatetimeWrapper.now() - datetime.timedelta(hours=self.config.cooldown_hours)
@@ -604,7 +614,7 @@ class AccountServer:
                       f"   {username_exclusion}"
                       f" GROUP BY a.username"
                       f" {order_by_query} LIMIT 1"
-                      f" {'FOR UPDATE' if reserve else ''};")
+                      f" {'FOR UPDATE' if reserve else ''}")
             if do_log:
                 device_logger.info(select)
             else:
@@ -633,7 +643,8 @@ class AccountServer:
 
                         account = (username, pw, level, encounters, softban_info)
                 except Exception as ex:
-                    device_logger.error("Exception during query {}. Exception: {}", select, ex)
+                    logger.exception(ex)
+                    logger.opt(exception=True).error("Exception during query {}. Exception: {}", select, ex)
                 finally:
                     cursor.close()
 
