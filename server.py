@@ -182,30 +182,31 @@ class AccountServer:
                   f" LIMIT 1;")
 
         try:
+            data = None
             with Db() as conn:
-                cursor = conn.cur
+                cursor = conn.cursor(buffered=True)
                 cursor.execute(select)
                 elem = cursor.fetchone()
                 if elem:
-                    select_reason = (f"SELECT ah.reason FROM accounts_history ah WHERE ah.username = '{elem[0]}' AND device = '{device}'")
-                    cursor.execute(select_reason)
-                    reason_response = cursor.fetchone()
-                    reason = None
-                    if reason_response:
-                        reason = reason_response[0]
-
                     last_returned_limit = self.config.get_cooldown_timestamp()
                     is_burnt = last_returned_limit < int(elem[2])
                     encounters = int(elem[5]) if elem[5] else 0
                     softban_info = (elem[6], elem[7]) if elem[6] else None
                     account = (elem[0], "", int(elem[2]), encounters, softban_info)
-                    reason = reason if reason else elem[4]
+                    reason = elem[4] if elem[4] else None
                     data = self._build_account_response(account=account, last_returned=elem[3], last_reason=reason, is_burnt=1 if is_burnt else 0)
-                    return self.resp_ok(data=data)
+                if data:
+                    select_reason = (f"SELECT ah.reason FROM accounts_history ah WHERE ah.username = '{data['username']}' AND device = '{device}'")
+                    cursor.execute(select_reason)
+                    reason_response = cursor.fetchone()
+                    if reason_response:
+                        data['last_reason'] = reason_response[0]
         except Exception as ex:
             logger.exception(ex)
             logger.warning(f"Error during query: {select}")
             return self.invalid_request(code=500)
+        if data:
+            return self.resp_ok(data=data)
         return self.resp_ok(code=204)
 
     def get_account(self, device=None):
@@ -299,7 +300,7 @@ class AccountServer:
             # drop any previous usage of requesting device
             reset = (f"UPDATE accounts SET in_use_by = NULL, last_updated = '{int(time.time())}' WHERE in_use_by = '{device}';")
             reset_history = (
-                f"UPDATE accounts_history SET returned = '{DatetimeWrapper.now()}', reason = 'reset' WHERE device = '{device}' AND returned IS NULL AND acquired > '2023-06-13 11:00:00' ORDER BY ID desc LIMIT 1;")
+                f"UPDATE accounts_history SET returned = '{DatetimeWrapper.now()}', reason = 'reset' WHERE device = '{device}' AND returned IS NULL ORDER BY ID desc LIMIT 1;")
 
             updated = 0
             with Db() as conn:
@@ -319,7 +320,7 @@ class AccountServer:
 
         # device_logger.debug(f"get_account(reason={reason}) returns: user {account[0]}, encounters {account[3]} ")
 
-        self._write_history(username=account[0], device=device, acquired=DatetimeWrapper.now(), reason=reason, purpose=purpose)
+        self._write_history(username=account[0], device=device, acquired=DatetimeWrapper.now(), new_reason=reason, purpose=purpose)
 
         data = self._build_account_response(account=account, last_returned=None, last_reason=None, is_burnt=0)
         device_logger.info("get_account: " + str(data))
@@ -375,7 +376,7 @@ class AccountServer:
 
         device_logger.info(f"Login of {username}")
 
-        self._write_history(username, device, reason='login')
+        self._write_history(username, device, new_reason='login')
 
         return self.resp_ok(data={"username": username, "status": "logged in"})
 
@@ -416,7 +417,7 @@ class AccountServer:
         except Exception as ex:
             logger.warning(f"Exception in {reset}: {ex}")
 
-        self._write_history(username, device, reason='logout', encounters=encounters, returned=DatetimeWrapper.now())
+        self._write_history(username, device, new_reason='logout', encounters=encounters, returned=DatetimeWrapper.now())
 
         return self.resp_ok(data={"username": username, "status": "logged out"})
 
@@ -461,11 +462,11 @@ class AccountServer:
         encounters = 0
         if 'encounters' in args:
             encounters = int(args['encounters'])
-        self._write_history(username, device, reason=last_reason, encounters=encounters, returned=DatetimeWrapper.now())
+        self._write_history(username, device, new_reason=last_reason, encounters=encounters, returned=DatetimeWrapper.now())
 
         return self.resp_ok(data={"username": username, "status": "burned"})
 
-    def _write_history(self, username: str, device: str, reason: str, encounters: int = 0, acquired: Optional[datetime.datetime] = None,
+    def _write_history(self, username: str, device: str, new_reason: str, encounters: int = 0, acquired: Optional[datetime.datetime] = None,
         returned: Optional[datetime.datetime] = None, purpose: str = None):
         if not device:
             return self.invalid_request(data="Missing 'device' parameter")
@@ -476,18 +477,19 @@ class AccountServer:
             cursor = conn.cursor()
             acquired_sql = f", acquired = '{acquired}'" if acquired else ''
             returned_sql = f", returned = '{returned}'" if returned else ''
-            reason_sql = f", reason = '{reason}'" if reason else ''
+            reason_sql = f", reason = '{new_reason}'" if new_reason else ''
             encounters_sql = f", encounters = '{encounters}'" if encounters else ''
             purpose_sql = f", purpose = '{purpose}'" if purpose else ''
 
-            find_candidate_query = f"SELECT id, reason from accounts_history WHERE device = '{device}' AND username = '{username}' AND returned IS NULL ORDER BY ID desc LIMIT 1 FOR UPDATE;"
+            new_history_before = DatetimeWrapper.now() - datetime.timedelta(hours=24)
+            find_candidate_query = f"SELECT id, reason from accounts_history WHERE device = '{device}' AND username = '{username}' AND returned IS NULL AND acquired > '{new_history_before}' ORDER BY ID desc LIMIT 1 FOR UPDATE;"
             history_query = None
             try:
                 cursor.execute(find_candidate_query)
                 elem = cursor.fetchone()
                 if elem:
-                    # TODO: possibly delete the history entry due to irrelevance
-                    if elem[1] and elem[1] == 'prelogin' and reason == 'logout':
+                    old_reason = elem[1] if elem[1] else None
+                    if old_reason and old_reason == 'prelogin' and new_reason == 'logout':
                         reason_sql = f", reason = 'nologin'"
 
                     if returned_sql or reason_sql or encounters_sql:
@@ -574,7 +576,7 @@ class AccountServer:
             cooldown_seconds = Location.calculate_cooldown(distance_last_action, QUEST_WALK_SPEED_CALCULATED)
             # logger.info(f"Cooldown: {cooldown_seconds}")
             usable = DatetimeWrapper.now() > softban_time + datetime.timedelta(seconds=cooldown_seconds)
-            # logger.info(f"Usable: {usable}")
+            logger.info(f"Usable: {usable}")
             return self.resp_ok(data=account)
         return self.resp_ok(code=204)
 
