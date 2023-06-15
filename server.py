@@ -73,6 +73,7 @@ class AccountServer:
         self.app.add_url_rule("/get/<device>/info", "get_account_info", self.get_account_info, methods=['GET'])
         self.app.add_url_rule("/set/<device>/level/<int:level>", "set_level", self.set_level, methods=['POST'])
         self.app.add_url_rule("/set/<device>/burned", "set_burned", self.set_burned, methods=['POST'])
+        self.app.add_url_rule("/set/<device>/login", "set_login", self.track_login, methods=['POST'])
         self.app.add_url_rule("/set/<device>/logout", "set_logout", self.set_logout, methods=['POST'])
         self.app.add_url_rule("/set/<device>/softban", "set_softban", self.set_softban, methods=['POST'])
 
@@ -171,7 +172,7 @@ class AccountServer:
         device_logger.debug(f"get_account_info()")
 
         encounters_from = DatetimeWrapper.now() - datetime.timedelta(hours=self.config.cooldown_hours)
-        select = (f"SELECT a.username, '***', a.level, a.last_returned, a.last_burned, COALESCE(ah.total, 0), a.softban_time, a.softban_location "
+        select = (f"SELECT a.username, '***', a.level, a.last_returned, a.last_reason, COALESCE(ah.total, 0), a.softban_time, a.softban_location "
                   f"  FROM accounts a LEFT JOIN "
                   f"       (SELECT ax.username, SUM(ax.encounters) total FROM accounts_history ax "
                   f"         WHERE ax.returned > '{encounters_from}' "
@@ -182,14 +183,24 @@ class AccountServer:
 
         try:
             with Db() as conn:
-                conn.cur.execute(select)
-                for elem in conn.cur:
+                cursor = conn.cur
+                cursor.execute(select)
+                elem = cursor.fetchone()
+                if elem:
+                    select_reason = (f"SELECT ah.reason FROM accounts_history ah WHERE ah.username = '{elem[0]}' AND device = '{device}'")
+                    cursor.execute(select_reason)
+                    reason_response = cursor.fetchone()
+                    reason = None
+                    if reason_response:
+                        reason = reason_response[0]
+
                     last_returned_limit = self.config.get_cooldown_timestamp()
                     is_burnt = last_returned_limit < int(elem[2])
                     encounters = int(elem[5]) if elem[5] else 0
                     softban_info = (elem[6], elem[7]) if elem[6] else None
                     account = (elem[0], "", int(elem[2]), encounters, softban_info)
-                    data = self._build_account_response(account=account, last_returned=elem[3], last_reason=elem[4], is_burnt=1 if is_burnt else 0)
+                    reason = reason if reason else elem[4]
+                    data = self._build_account_response(account=account, last_returned=elem[3], last_reason=reason, is_burnt=1 if is_burnt else 0)
                     return self.resp_ok(data=data)
         except Exception as ex:
             logger.exception(ex)
@@ -245,7 +256,8 @@ class AccountServer:
         account = None
 
         # sticky accounts (prefer account reusage unless burned)
-        if not reason:
+        try_reusing_previous_login = True
+        if try_reusing_previous_login:
             encounters_from = DatetimeWrapper.now() - datetime.timedelta(hours=self.config.cooldown_hours)
             purpose_query = _purpose_to_level_query(device_logger, purpose)
             last_returned_limit = self.config.get_cooldown_timestamp()
@@ -343,6 +355,29 @@ class AccountServer:
 
         device_logger.debug(args)
         return self.resp_ok(code=204)
+
+    def track_login(self, device=None):
+        if not device:
+            return self.invalid_request(data="Missing 'device' parameter")
+        device_logger = logger.bind(name=device)
+
+        username = None
+        claimed_sql = f"SELECT username FROM accounts WHERE in_use_by = '{device}'"
+        with Db() as conn:
+            conn.cur.execute(claimed_sql)
+            for elem in conn.cur:
+                username = elem[0]
+                break
+
+        if not username:
+            device_logger.debug(f"Unable to track login due to missing assignment.")
+            return self.resp_ok()
+
+        device_logger.info(f"Login of {username}")
+
+        self._write_history(username, device, reason='login')
+
+        return self.resp_ok(data={"username": username, "status": "logged in"})
 
     def set_logout(self, device=None):
         if not device:
@@ -445,12 +480,16 @@ class AccountServer:
             encounters_sql = f", encounters = '{encounters}'" if encounters else ''
             purpose_sql = f", purpose = '{purpose}'" if purpose else ''
 
-            find_candidate_query = f"SELECT id from accounts_history WHERE device = '{device}' AND username = '{username}' AND returned IS NULL ORDER BY ID desc LIMIT 1 FOR UPDATE;"
+            find_candidate_query = f"SELECT id, reason from accounts_history WHERE device = '{device}' AND username = '{username}' AND returned IS NULL ORDER BY ID desc LIMIT 1 FOR UPDATE;"
             history_query = None
             try:
                 cursor.execute(find_candidate_query)
                 elem = cursor.fetchone()
                 if elem:
+                    # TODO: possibly delete the history entry due to irrelevance
+                    if elem[1] and elem[1] == 'prelogin' and reason == 'logout':
+                        reason_sql = f", reason = 'nologin'"
+
                     if returned_sql or reason_sql or encounters_sql:
                         history_query = (
                             f"UPDATE accounts_history SET device = device {returned_sql} {reason_sql} {encounters_sql} WHERE id = {int(elem[0])}")
@@ -461,7 +500,7 @@ class AccountServer:
                     device_logger.info(f"History: {history_query}")
                     cursor.execute(history_query)
             except Exception as ex:
-                device_logger.info(f"Unable to write history. Query: {find_candidate_query} / {history}: {ex}")
+                device_logger.info(f"Unable to write history. Query: {find_candidate_query} / {history_query}: {ex}")
             finally:
                 cursor.close()
 
