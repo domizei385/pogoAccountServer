@@ -402,7 +402,7 @@ class AccountServer:
 
         args = request.get_json()
 
-        encounters = int(args['encounters']) if 'encounters' in args else 0
+        encounters = int(args['encounters']) if 'encounters' in args else None
         level = int(args['level']) if 'level' in args else None
         level_sql = f" , level = {level}" if level and level > prev_level else ""
 
@@ -428,7 +428,7 @@ class AccountServer:
 
         username = None
         prev_level = 1
-        claimed_sql = f"SELECT username, last_use, level FROM accounts WHERE in_use_by = '{device}'"
+        claimed_sql = f"SELECT username, last_use, level FROM accounts WHERE in_use_by = '{device}' LIMIT 1 FOR UPDATE"
         with Db() as conn:
             conn.cur.execute(claimed_sql)
             for elem in conn.cur:
@@ -459,14 +459,14 @@ class AccountServer:
         with Db() as conn:
             conn.cur.execute(reset)
 
-        encounters = 0
+        encounters = None
         if 'encounters' in args:
             encounters = int(args['encounters'])
         self._write_history(username, device, new_reason=last_reason, encounters=encounters, returned=DatetimeWrapper.now())
 
         return self.resp_ok(data={"username": username, "status": "burned"})
 
-    def _write_history(self, username: str, device: str, new_reason: str, encounters: int = 0, acquired: Optional[datetime.datetime] = None,
+    def _write_history(self, username: str, device: str, new_reason: str, encounters: Optional[int] = None, acquired: Optional[datetime.datetime] = None,
         returned: Optional[datetime.datetime] = None, purpose: str = None):
         if not device:
             return self.invalid_request(data="Missing 'device' parameter")
@@ -478,24 +478,30 @@ class AccountServer:
             acquired_sql = f", acquired = '{acquired}'" if acquired else ''
             returned_sql = f", returned = '{returned}'" if returned else ''
             reason_sql = f", reason = '{new_reason}'" if new_reason else ''
-            encounters_sql = f", encounters = '{encounters}'" if encounters else ''
+            encounters_sql = f", encounters = GREATEST(encounters, {int(encounters)})" if encounters else ''
             purpose_sql = f", purpose = '{purpose}'" if purpose else ''
 
             new_history_before = DatetimeWrapper.now() - datetime.timedelta(hours=24)
-            find_candidate_query = f"SELECT id, reason from accounts_history WHERE device = '{device}' AND username = '{username}' AND returned IS NULL AND acquired > '{new_history_before}' ORDER BY ID desc LIMIT 1 FOR UPDATE;"
+            find_candidate_query = f"SELECT id, reason, encounters from accounts_history WHERE device = '{device}' AND username = '{username}' AND returned IS NULL AND acquired > '{new_history_before}' ORDER BY ID desc LIMIT 1 FOR UPDATE;"
             history_query = None
             try:
+                updating = False
                 cursor.execute(find_candidate_query)
                 elem = cursor.fetchone()
                 if elem:
                     old_reason = elem[1] if elem[1] else None
                     if old_reason and old_reason == 'prelogin' and new_reason == 'logout':
                         reason_sql = f", reason = 'nologin'"
+                    old_encounters = int(elem[2]) if elem[2] else None
+                    if old_encounters and encounters and old_encounters > encounters > 0:
+                        logger.warning(f"old_encounters {old_encounters} > encounters {encounters}. Incrementing.")
+                        encounters_sql = f", encounters = encounters + {encounters}"
 
                     if returned_sql or reason_sql or encounters_sql:
                         history_query = (
                             f"UPDATE accounts_history SET device = device {returned_sql} {reason_sql} {encounters_sql} WHERE id = {int(elem[0])}")
-                else:
+                        updating = True
+                if not updating:
                     history_query = (
                         f"INSERT INTO accounts_history SET username = '{username}', device = '{device}' {acquired_sql} {returned_sql} {reason_sql} {encounters_sql} {purpose_sql}")
                 if history_query:
