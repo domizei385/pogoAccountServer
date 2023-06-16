@@ -300,7 +300,7 @@ class AccountServer:
             # drop any previous usage of requesting device
             reset = (f"UPDATE accounts SET in_use_by = NULL, last_updated = '{int(time.time())}' WHERE in_use_by = '{device}';")
             reset_history = (
-                f"UPDATE accounts_history SET returned = '{DatetimeWrapper.now()}', reason = 'reset' WHERE device = '{device}' AND returned IS NULL ORDER BY ID desc LIMIT 1;")
+                f"UPDATE accounts_history SET returned = '{DatetimeWrapper.now()}', reason = 'reset' WHERE device = '{device}' AND returned IS NULL AND acquired > '{DatetimeWrapper.now() - datetime.timedelta(day=5)}' ORDER BY ID DESC LIMIT 1;")
 
             updated = 0
             with Db() as conn:
