@@ -488,7 +488,7 @@ class AccountServer:
                 elem = cursor.fetchone()
                 if elem:
                     old_reason = elem[1] if elem[1] else None
-                    if old_reason and old_reason == 'prelogin' and new_reason == 'logout':
+                    if old_reason and old_reason == 'prelogin' and new_reason == 'logout' and encounters and encounters == 0:
                         reason_sql = f", reason = 'nologin'"
                     old_encounters = int(elem[2]) if elem[2] else None
                     if old_encounters and encounters and old_encounters > encounters > 0:
