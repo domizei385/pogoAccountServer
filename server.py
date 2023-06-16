@@ -140,6 +140,7 @@ class AccountServer:
         device = request.args.get('device', default='', type=str)
         purpose = request.args.get('purpose', default='', type=str)
         region = request.args.get('region', default='', type=str)
+        do_log = request.args.get('logging', default=0, type=int)
 
         device_logger = logger.bind(name=device)
         device_logger.debug(f"get_availability({device}): purpose={purpose}, region={region}")
@@ -150,6 +151,8 @@ class AccountServer:
         purpose_query = _purpose_to_level_query(device_logger, purpose)
         select_reuse = f"SELECT 1 from accounts WHERE in_use_by = '{device}' AND {purpose_query} AND {last_returned_query} LIMIT 1;"
         try:
+            if do_log:
+                logger.info(select_reuse)
             resp = Db.get_single_results(select_reuse)
             if resp[0]:
                 # we can reuse the account
@@ -159,8 +162,7 @@ class AccountServer:
             logger.warning(f"Error during query: {select_reuse}")
             return self.invalid_request(code=500)
 
-        account = self._get_next_account(device=device, region=region, purpose=purpose, scan_location=None, do_log=False, reserve=False)
-        # TODO: fix and return more accurate count
+        account = self._get_next_account(device=device, region=region, purpose=purpose, scan_location=None, do_log=do_log, reserve=False)
         available = 1 if account else 0
 
         return self.resp_ok(data={"available": available, "type": "pool"})
