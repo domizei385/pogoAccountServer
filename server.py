@@ -300,7 +300,7 @@ class AccountServer:
             # drop any previous usage of requesting device
             reset = (f"UPDATE accounts SET in_use_by = NULL, last_updated = '{int(time.time())}' WHERE in_use_by = '{device}';")
             reset_history = (
-                f"UPDATE accounts_history SET returned = '{DatetimeWrapper.now()}', reason = 'reset' WHERE device = '{device}' AND returned IS NULL AND acquired > '{DatetimeWrapper.now() - datetime.timedelta(day=5)}' ORDER BY ID DESC LIMIT 1;")
+                f"UPDATE accounts_history SET returned = '{DatetimeWrapper.now()}', reason = 'reset' WHERE device = '{device}' AND returned IS NULL AND acquired > '{DatetimeWrapper.now() - datetime.timedelta(days=5)}' ORDER BY ID DESC LIMIT 1;")
 
             updated = 0
             with Db() as conn:
@@ -633,32 +633,54 @@ class AccountServer:
             return None
         device_logger = logger.bind(name=device)
 
+        # throttle device logins attempts per hour
+        device_logins = (f"   SELECT COUNT(*) device_logins FROM accounts_history"
+                         f"    WHERE acquired > '{DatetimeWrapper.now() - datetime.timedelta(hours=1)}'"
+                         f"      AND device = '{device}'"
+                         f"    LIMIT 1")
+        with Db() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(device_logins)
+                elem = cursor.fetchone()
+                if elem and int(elem[0]) > self.config.device_max_logins_hour:
+                    logger.warning(f"Device reached {int(elem[1])}/{self.config.device_max_logins_hour} new account assignments during the last hour. Cooling down.")
+                    return None
+            except:
+                logger.warning("Unable to check for device logins. Query: " + device_logins)
+                pass
+
+        # reuse account
         region_query = f" (region IS NULL OR region = '' OR region = '{region}')" if region else " 1=1 "
 
-        last_returned_limit = self.config.get_cooldown_timestamp()
-        last_returned_query = f"(last_returned IS NULL OR last_returned < {last_returned_limit} OR last_reason IS NULL)"
-        last_use_limit = self.config.get_short_cooldown_timestamp()
-        order_by_query = "ORDER BY a.level DESC" if purpose == 'level' else "ORDER BY a.last_use ASC"
+        last_returned_query = f"(last_returned IS NULL OR last_returned < {self.config.get_cooldown_timestamp()} OR last_reason IS NULL)"
+        order_by_query = "ORDER BY a.level DESC, a.last_use ASC" if purpose == 'level' else "ORDER BY a.last_use ASC"
 
-        purpose_query = _purpose_to_level_query(device_logger, purpose)
-        encounters_from = DatetimeWrapper.now() - datetime.timedelta(hours=self.config.cooldown_hours)
+        purpose_level_requirement = _purpose_to_level_query(device_logger, purpose)
+        count_encounters_from = DatetimeWrapper.now() - datetime.timedelta(hours=self.config.cooldown_hours)
 
         account = None
         ignore_accounts = list()
         while not account and len(ignore_accounts) < 20:
             username_exclusion = f"AND a.username NOT IN ({','.join(ignore_accounts)})" if len(ignore_accounts) > 0 else ""
-            select = (f"SELECT a.username, a.password, a.level, COALESCE(ah.total, 0), a.softban_time, a.softban_location "
+            select = (f"SELECT a.username, a.password, a.level, COALESCE(ah.total, 0), a.softban_time, a.softban_location, COALESCE(bh.user_logins, 0) "
                       f"  FROM accounts a LEFT JOIN "
-                      f"       (SELECT ax.username, SUM(ax.encounters) total FROM accounts_history ax "
-                      f"         WHERE ax.returned > '{encounters_from}' "
-                      f"      GROUP BY ax.username"
-                      f"        HAVING SUM(ax.encounters) < {self.config.encounter_limit * 0.8}"  # at least 20% of encounters left to prevent frequent relogins 
+                      f"       (SELECT username, SUM(encounters) total FROM accounts_history ah"
+                      f"         WHERE returned > '{count_encounters_from}' "
+                      f"      GROUP BY username"
+                      f"        HAVING SUM(encounters) < {self.config.encounter_limit * 0.8}"  # at least 20% of encounters left to prevent frequent relogins 
                       f"       ) ah ON a.username = ah.username"
+                      f"                  LEFT JOIN"
+                      f"      (SELECT username, COUNT(*) user_logins FROM accounts_history bh"
+                      f"        WHERE acquired > '{DatetimeWrapper.now() - datetime.timedelta(hours=1)}'"
+                      f"     GROUP BY username"
+                      f"      ) bh ON a.username = bh.username"
                       f" WHERE in_use_by IS NULL "
                       f"   AND {last_returned_query}"
-                      f"   AND (last_use < {last_use_limit} OR level < 30)"
-                      f"   AND {purpose_query}"
+                      f"   AND (last_use < {self.config.get_short_cooldown_timestamp()} OR level < 30)"
+                      f"   AND {purpose_level_requirement}"
                       f"   AND {region_query}"
+                      f"   AND bh.user_logins <= {self.config.account_max_logins_hour}"  # limit login attempts per account to 4/hour
                       f"   {username_exclusion}"
                       f" GROUP BY a.username"
                       f" {order_by_query} LIMIT 1"

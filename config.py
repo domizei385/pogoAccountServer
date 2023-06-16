@@ -24,6 +24,8 @@ class Config:
     short_cooldown_hours = general.getint("cooldown_reuse", 3)
     short_cooldown_seconds = short_cooldown_hours * 60 * 60
     encounter_limit = general.getint("encounter_limit", 6500)
+    device_max_logins_hour = general.getint("device_max_logins_per_hour", 4)
+    account_max_logins_hour = general.getint("account_max_logins_per_hour", 4)
 
     args = parser.parse_args()
     if args.verbose:
