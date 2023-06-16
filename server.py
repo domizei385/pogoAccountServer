@@ -665,7 +665,7 @@ class AccountServer:
         ignore_accounts = list()
         while not account and len(ignore_accounts) < 20:
             username_exclusion = f"AND a.username NOT IN ({','.join(ignore_accounts)})" if len(ignore_accounts) > 0 else ""
-            select = (f"SELECT a.username, a.password, a.level, COALESCE(ah.total, 0), a.softban_time, a.softban_location, COALESCE(bh.user_logins, 0) "
+            select = (f"SELECT a.username, a.password, a.level, COALESCE(ah.total, 0), a.softban_time, a.softban_location "
                       f"  FROM accounts a LEFT JOIN "
                       f"       (SELECT username, SUM(encounters) total FROM accounts_history ah"
                       f"         WHERE returned > '{count_encounters_from}' "
@@ -682,7 +682,7 @@ class AccountServer:
                       f"   AND (last_use < {self.config.get_short_cooldown_timestamp()} OR level < 30)"
                       f"   AND {purpose_level_requirement}"
                       f"   AND {region_query}"
-                      f"   AND bh.user_logins <= {self.config.account_max_logins_hour}"  # limit login attempts per account to 4/hour
+                      f"   AND COALESCE(bh.user_logins, 0) <= {self.config.account_max_logins_hour}"  # limit login attempts per account to 4/hour
                       f"   {username_exclusion}"
                       f" GROUP BY a.username"
                       f" {order_by_query} LIMIT 1"
