@@ -443,15 +443,15 @@ class AccountServer:
 
         args = request.get_json()
 
-        last_reason = args['reason'] if 'reason' in args else None
+        reason = args['reason'] if 'reason' in args else None
         last_burned_sql = ''
-        if last_reason == "maintenance":
+        if reason == "maintenance":
             last_burned_sql = f", last_burned = '{DatetimeWrapper.now()}'"
-        last_reason_sql = f" last_reason = '{last_reason}'" if last_reason else " last_reason = NULL"
+        last_reason_sql = f" last_reason = '{reason}'" if reason else " last_reason = NULL"
         level = int(args["level"]) if 'level' in args else None
         level_sql = f" level = '{level}'" if level and (level > prev_level) else " level = level"
 
-        device_logger.info(f"Request to burn account {username} (reason: {last_reason}), acquired {humanize.precisedelta(int(time.time()) - last_used)} ago)")
+        device_logger.info(f"Request to burn account {username} (reason: {reason}), acquired {humanize.precisedelta(int(time.time()) - last_used)} ago)")
 
         reset = (f"UPDATE accounts SET in_use_by = NULL, last_returned = '{int(time.time())}', last_updated = '{int(time.time())}'"
                  f" {last_burned_sql}, {last_reason_sql}, {level_sql}, purpose = NULL WHERE in_use_by = '{device}';")
@@ -462,7 +462,7 @@ class AccountServer:
         encounters = None
         if 'encounters' in args:
             encounters = int(args['encounters'])
-        self._write_history(username, device, new_reason=last_reason, encounters=encounters, returned=DatetimeWrapper.now())
+        self._write_history(username, device, new_reason=reason, encounters=encounters, returned=DatetimeWrapper.now())
 
         return self.resp_ok(data={"username": username, "status": "burned"})
 
@@ -479,7 +479,7 @@ class AccountServer:
             reason_sql = f", reason = '{new_reason}'" if new_reason else ''
             encounters_sql = f", encounters = GREATEST(encounters, {int(encounters)})" if encounters else ''
 
-            new_history_before = DatetimeWrapper.now() - datetime.timedelta(hours=24)
+            new_history_before = DatetimeWrapper.now() - datetime.timedelta(days=5)
             find_candidate_query = f"SELECT id, reason, encounters from accounts_history WHERE device = '{device}' AND username = '{username}' AND returned IS NULL AND acquired > '{new_history_before}' ORDER BY ID desc LIMIT 1 FOR UPDATE;"
             history_query = None
             try:
