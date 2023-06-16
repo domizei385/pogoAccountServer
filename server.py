@@ -475,11 +475,9 @@ class AccountServer:
         # check whether we have an update candidate
         with Db() as conn:
             cursor = conn.cursor()
-            acquired_sql = f", acquired = '{acquired}'" if acquired else ''
             returned_sql = f", returned = '{returned}'" if returned else ''
             reason_sql = f", reason = '{new_reason}'" if new_reason else ''
             encounters_sql = f", encounters = GREATEST(encounters, {int(encounters)})" if encounters else ''
-            purpose_sql = f", purpose = '{purpose}'" if purpose else ''
 
             new_history_before = DatetimeWrapper.now() - datetime.timedelta(hours=24)
             find_candidate_query = f"SELECT id, reason, encounters from accounts_history WHERE device = '{device}' AND username = '{username}' AND returned IS NULL AND acquired > '{new_history_before}' ORDER BY ID desc LIMIT 1 FOR UPDATE;"
@@ -502,6 +500,9 @@ class AccountServer:
                             f"UPDATE accounts_history SET device = device {returned_sql} {reason_sql} {encounters_sql} WHERE id = {int(elem[0])}")
                         updating = True
                 if not updating:
+                    acquired = acquired if acquired else DatetimeWrapper.now()
+                    acquired_sql = f", acquired = '{acquired}'"
+                    purpose_sql = f", purpose = '{purpose}'" if purpose else ''
                     history_query = (
                         f"INSERT INTO accounts_history SET username = '{username}', device = '{device}' {acquired_sql} {returned_sql} {reason_sql} {encounters_sql} {purpose_sql}")
                 if history_query:
