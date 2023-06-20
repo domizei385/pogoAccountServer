@@ -646,10 +646,10 @@ class AccountServer:
                 cursor.execute(device_logins)
                 elem = cursor.fetchone()
                 if elem and int(elem[0]) > self.config.device_max_logins_hour:
-                    logger.warning(f"Device reached {int(elem[1])}/{self.config.device_max_logins_hour} new account assignments during the last hour. Cooling down.")
+                    logger.warning(f"Device reached {int(elem[0])}/{self.config.device_max_logins_hour} new account assignments during the last hour. Cooling down.")
                     return None
-            except:
-                logger.warning("Unable to check for device logins. Query: " + device_logins)
+            except Exception as ex:
+                logger.warning(f"Unable to check for device logins. Query: {device_logins}: {ex}")
                 pass
 
         # reuse account
