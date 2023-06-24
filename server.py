@@ -656,7 +656,7 @@ class AccountServer:
         region_query = f" (region IS NULL OR region = '' OR region = '{region}')" if region else " 1=1 "
 
         last_returned_query = f"(last_returned IS NULL OR last_returned < {self.config.get_cooldown_timestamp()} OR last_reason IS NULL)"
-        order_by_query = "ORDER BY a.level DESC, a.last_use ASC" if purpose == 'level' else "ORDER BY a.last_use ASC"
+        order_by_query = "ORDER BY a.level DESC, a.last_use ASC" if purpose == 'level' else "ORDER BY a.region IS NULL, a.last_use ASC"
 
         purpose_level_requirement = _purpose_to_level_query(device_logger, purpose)
         count_encounters_from = DatetimeWrapper.now() - datetime.timedelta(hours=self.config.cooldown_hours)
